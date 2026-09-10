@@ -56,6 +56,14 @@ type Summary struct {
 	Score int
 }
 
+// CallDump is one upstream HTTP response, excluding OAuth token exchange.
+type CallDump struct {
+	Method string
+	URL    string
+	Status int
+	Body   []byte
+}
+
 type Client struct {
 	npsso string
 	ep    Endpoints
@@ -65,6 +73,10 @@ type Client struct {
 	accessToken  string
 	refreshToken string
 	accessExpiry time.Time
+
+	dumpMu sync.Mutex
+	dumpOn bool
+	dumps  []CallDump
 }
 
 func New(npsso string) *Client {
@@ -83,7 +95,62 @@ func NewWithEndpoints(npsso string, ep Endpoints) *Client {
 	rc.SetDebug(false)
 	rc.SetDisableWarn(true)
 	rc.SetLogger(discardLogger{})
-	return &Client{npsso: strings.TrimSpace(npsso), ep: ep, http: rc}
+	c := &Client{npsso: strings.TrimSpace(npsso), ep: ep, http: rc}
+	rc.OnAfterResponse(func(_ *resty.Client, resp *resty.Response) error {
+		c.recordDump(resp)
+		return nil
+	})
+	return c
+}
+
+// EnableDump records non-auth response bodies for CLI inspection.
+func (c *Client) EnableDump() {
+	c.dumpMu.Lock()
+	defer c.dumpMu.Unlock()
+	c.dumpOn = true
+	c.dumps = nil
+}
+
+func (c *Client) Dumps() []CallDump {
+	c.dumpMu.Lock()
+	defer c.dumpMu.Unlock()
+	out := make([]CallDump, len(c.dumps))
+	copy(out, c.dumps)
+	return out
+}
+
+func (c *Client) recordDump(resp *resty.Response) {
+	if resp == nil || resp.Request == nil {
+		return
+	}
+	c.dumpMu.Lock()
+	defer c.dumpMu.Unlock()
+	if !c.dumpOn {
+		return
+	}
+	rawURL := resp.Request.URL
+	if isAuthURL(rawURL) {
+		return
+	}
+	body := append([]byte(nil), resp.Body()...)
+	c.dumps = append(c.dumps, CallDump{
+		Method: resp.Request.Method,
+		URL:    rawURL,
+		Status: resp.StatusCode(),
+		Body:   body,
+	})
+}
+
+func isAuthURL(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	path := rawURL
+	if err == nil {
+		path = u.Path
+	}
+	return strings.Contains(path, "/oauth") ||
+		strings.Contains(path, "/authz") ||
+		strings.HasSuffix(path, "/token") ||
+		strings.HasSuffix(path, "/authorize")
 }
 
 type discardLogger struct{}

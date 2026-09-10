@@ -244,7 +244,7 @@ score = bronze*15 + silver*30 + gold*90 + platinum*300
 7. `GET .../trophy/v1/users/{accountId}/trophySummary` 取 `earnedTrophies`；403 → `private`；404 → `not_found`；429 / 5xx / 超时 / 负计数 → `upstream`
 8. 积分仍按本地公式计算，不直接采用上游 `trophyPoint`
 
-本地验收命令：`PSN_NPSSO=... go run ./cmd/psnlookup <online-id>`。无凭证时不验收真实网络。
+本地验收命令：`PSN_NPSSO=... go run ./cmd/psnlookup <online-id>`。无凭证时不验收真实网络。`go run ./cmd/psnlookup --raw <online-id>` 打印非鉴权接口的完整响应 JSON，禁止 dump oauth `/token` 与 NPSSO。
 
 **入榜**
 

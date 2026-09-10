@@ -180,6 +180,73 @@ func TestErrorStringOmitsNPSSO(t *testing.T) {
 	assertNoSecret(t, err)
 }
 
+func TestDumpCapturesTrophyJSONAndSkipsOAuth(t *testing.T) {
+	t.Parallel()
+	srv := newPSNServer(t, psnScript{
+		meOnlineID: "operator",
+		search: map[string]searchHit{
+			"cutecleverdevil": {accountID: "111", onlineID: "CuteCleverDevil"},
+		},
+		trophies: map[string]Counts{
+			"111": {Bronze: 10, Silver: 4, Gold: 2, Platinum: 1},
+		},
+	})
+	c := NewWithEndpoints(secretNPSSO, testEndpoints(srv.URL))
+	c.EnableDump()
+	if _, err := c.Lookup(context.Background(), "cutecleverdevil"); err != nil {
+		t.Fatal(err)
+	}
+	dumps := c.Dumps()
+	if len(dumps) == 0 {
+		t.Fatal("expected dumped responses")
+	}
+	var sawTrophy, sawSearch bool
+	for _, d := range dumps {
+		text := string(d.Body)
+		if strings.Contains(d.URL, "/oauth") || strings.Contains(d.URL, "/token") || strings.Contains(d.URL, "/authorize") {
+			t.Fatalf("oauth response dumped: %s", d.URL)
+		}
+		if strings.Contains(text, "access-token") || strings.Contains(text, secretNPSSO) {
+			t.Fatalf("dump leaked secret: %s", text)
+		}
+		if strings.Contains(d.URL, "/trophySummary") {
+			sawTrophy = true
+			if !strings.Contains(text, `"platinum":1`) && !strings.Contains(text, `"platinum": 1`) {
+				t.Fatalf("trophy dump missing counts: %s", text)
+			}
+		}
+		if strings.Contains(d.URL, "/universalSearch") {
+			sawSearch = true
+		}
+	}
+	if !sawTrophy {
+		t.Fatal("trophySummary response not dumped")
+	}
+	if !sawSearch {
+		t.Fatal("universalSearch response not dumped")
+	}
+}
+
+func TestDumpOffByDefault(t *testing.T) {
+	t.Parallel()
+	srv := newPSNServer(t, psnScript{
+		meOnlineID: "operator",
+		search: map[string]searchHit{
+			"cutecleverdevil": {accountID: "111", onlineID: "CuteCleverDevil"},
+		},
+		trophies: map[string]Counts{
+			"111": {Bronze: 1},
+		},
+	})
+	c := NewWithEndpoints(secretNPSSO, testEndpoints(srv.URL))
+	if _, err := c.Lookup(context.Background(), "cutecleverdevil"); err != nil {
+		t.Fatal(err)
+	}
+	if dumps := c.Dumps(); len(dumps) != 0 {
+		t.Fatalf("dump should be empty by default, got %d", len(dumps))
+	}
+}
+
 func testEndpoints(origin string) Endpoints {
 	return Endpoints{
 		Auth:   origin + "/oauth",

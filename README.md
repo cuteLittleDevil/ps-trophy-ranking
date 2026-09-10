@@ -15,6 +15,34 @@ go run ./cmd/psnlookup cutecleverdevil
 
 也可把 `PSN_NPSSO` 写进项目根目录的 `.env`（已被 gitignore）。成功时打印白金 / 金 / 银 / 铜数量和奖杯积分。
 
+默认只打印解析后的汇总。要看索尼接口返回的**完整 JSON**（搜索用户、奖杯汇总等，不含 token）：
+
+```bash
+go run ./cmd/psnlookup --raw cutecleverdevil
+```
+
+奖杯汇总来自 `GET https://m.np.playstation.com/api/trophy/v1/users/{accountId}/trophySummary`，形态如下（字段以现场响应为准）：
+
+```json
+{
+  "accountId": "0000000000000000000",
+  "trophyLevel": 437,
+  "trophyPoint": 200430,
+  "trophyLevelBasePoint": 199890,
+  "trophyLevelNextPoint": 201240,
+  "progress": 40,
+  "tier": 5,
+  "earnedTrophies": {
+    "bronze": 6212,
+    "silver": 1450,
+    "gold": 525,
+    "platinum": 55
+  }
+}
+```
+
+本工具只用 `earnedTrophies`，积分按本地公式 `铜*15 + 银*30 + 金*90 + 白金*300` 计算，不采用上游 `trophyPoint`。`--raw` 不会打印 NPSSO 或 access token。
+
 ## 文档
 
 - 产品需求：`tasks/prd-psn-trophy-leaderboard.md`

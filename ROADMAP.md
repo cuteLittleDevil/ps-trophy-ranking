@@ -10,13 +10,14 @@ v1 排行榜页面未做。已完成按 Online ID 拉取奖杯汇总的 PSN 客�
 
 ## 最近完成
 
+- 2026-09-10 22:37 `psnlookup --raw`：打印索尼搜索 / trophySummary 等完整 JSON，不 dump token
 - 2026-09-10 22:11 实现 `internal/psn` + `cmd/psnlookup`：NPSSO 换 token、解析 Online ID、拉 `trophySummary`
 - 2026-09-10 21:43 定稿 v1 PRD（产品行为，不绑定库）：`tasks/prd-psn-trophy-leaderboard.md`
 - 2026-09-10 21:43 定稿 v1 SPEC（Go / HTML / SQLite / resty / fixture 与 PSN）：`tasks/spec-psn-trophy-leaderboard.md`
 
 ## 最近验证
 
-- 2026-09-10 22:14 真实查询 `cutecleverdevil`：白金 14、金 48、银 144、铜 636、积分 22380；与 PSNINE 公开页数字一致
+- 2026-09-10 22:37 `go test ./...`：`--raw` dump 覆盖 trophy JSON、跳过 oauth token
 - 2026-09-10 22:11 `go test ./...`：`internal/psn` 与 `cmd/psnlookup` 通过
 - 2026-09-10 22:11 `.env` 已被 gitignore，不会进入提交
 
