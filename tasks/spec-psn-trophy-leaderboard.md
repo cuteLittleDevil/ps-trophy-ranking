@@ -238,7 +238,7 @@ score = bronze*15 + silver*30 + gold*90 + platinum*300
 1. `PSN_NPSSO` 为空 → `no_credentials`，不访问网络
 2. NPSSO 换 access code（`oauth/authorize`，读 302 `Location` 的 `code`），再换 access / refresh token；失败 → `invalid_credentials`
 3. access token 进程内缓存，过期前 60 秒刷新；禁止把 NPSSO / token 写入日志或 `error` 字符串
-4. `GET .../users/me/profiles`：若 `onlineId` 与目标 ID 大小写相同，accountId 用 `me`（universal search 不会返回当前登录账号）
+4. `GET .../users/me/profiles`：若返回 400/404（该接口不接受 `me`），忽略并继续；若 `onlineId` 与目标 ID 大小写相同，accountId 用 `me`
 5. 否则 `POST .../search/v1/universalSearch`，`domain=SocialAllAccounts`，只接受 `onlineId` 精确匹配（忽略大小写）
 6. 搜索无精确命中则回退 legacy `.../users/{id}/profile2`；仍无 `accountId` → `not_found`
 7. `GET .../trophy/v1/users/{accountId}/trophySummary` 取 `earnedTrophies`；403 → `private`；404 → `not_found`；429 / 5xx / 超时 / 负计数 → `upstream`

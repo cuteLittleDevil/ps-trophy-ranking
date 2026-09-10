@@ -139,8 +139,8 @@ func (c *Client) resolveUser(ctx context.Context, token, onlineID string) (resol
 	if err != nil {
 		return resolvedUser{}, err
 	}
-	if strings.EqualFold(me.displayID, onlineID) {
-		return resolvedUser{accountID: "me", displayID: me.displayID, avatarURL: me.avatarURL}, nil
+	if me != nil && strings.EqualFold(me.displayID, onlineID) {
+		return *me, nil
 	}
 
 	found, err := c.searchExact(ctx, token, onlineID)
@@ -296,26 +296,33 @@ type namedAvatar struct {
 	url  string
 }
 
-func (c *Client) meProfile(ctx context.Context, token string) (resolvedUser, error) {
+func (c *Client) meProfile(ctx context.Context, token string) (*resolvedUser, error) {
 	resp, err := c.authedGet(ctx, token, joinURL(c.ep.User, "/me/profiles"))
 	if err != nil {
-		return resolvedUser{}, err
+		return nil, err
+	}
+	// This endpoint requires a numeric accountId; "me" returns 400.
+	if resp.StatusCode() == http.StatusBadRequest || resp.StatusCode() == http.StatusNotFound {
+		return nil, nil
 	}
 	if resp.StatusCode() == http.StatusUnauthorized {
-		return resolvedUser{}, kindErr(KindInvalidCredentials)
+		return nil, kindErr(KindInvalidCredentials)
 	}
 	if resp.StatusCode() < 200 || resp.StatusCode() >= 300 {
-		return resolvedUser{}, kindErr(KindUpstream)
+		return nil, kindErr(KindUpstream)
 	}
 	var body meProfileJSON
 	if err := json.Unmarshal(resp.Body(), &body); err != nil {
-		return resolvedUser{}, kindErr(KindUpstream)
+		return nil, kindErr(KindUpstream)
+	}
+	if body.OnlineID == "" {
+		return nil, nil
 	}
 	avatars := make([]namedAvatar, 0, len(body.Avatars))
 	for _, a := range body.Avatars {
 		avatars = append(avatars, namedAvatar{size: a.Size, url: a.URL})
 	}
-	return resolvedUser{accountID: "me", displayID: body.OnlineID, avatarURL: pickAvatar(avatars)}, nil
+	return &resolvedUser{accountID: "me", displayID: body.OnlineID, avatarURL: pickAvatar(avatars)}, nil
 }
 
 type searchRequest struct {

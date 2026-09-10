@@ -85,6 +85,28 @@ func TestLookupSelfSkipsSearch(t *testing.T) {
 	}
 }
 
+func TestLookupContinuesWhenMeProfileRejected(t *testing.T) {
+	t.Parallel()
+	srv := newPSNServer(t, psnScript{
+		meStatus:   http.StatusBadRequest,
+		meOnlineID: "operator",
+		search: map[string]searchHit{
+			"cutecleverdevil": {accountID: "111", onlineID: "CuteCleverDevil", avatar: "https://img.example/xl.png"},
+		},
+		trophies: map[string]Counts{
+			"111": {Bronze: 10, Silver: 4, Gold: 2, Platinum: 1},
+		},
+	})
+	c := NewWithEndpoints(secretNPSSO, testEndpoints(srv.URL))
+	sum, err := c.Lookup(context.Background(), "cutecleverdevil")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.DisplayID != "CuteCleverDevil" || sum.Platinum != 1 {
+		t.Fatalf("got %+v", sum)
+	}
+}
+
 func TestLookupNotFound(t *testing.T) {
 	t.Parallel()
 	srv := newPSNServer(t, psnScript{meOnlineID: "operator"})
@@ -176,6 +198,7 @@ type searchHit struct {
 
 type psnScript struct {
 	meOnlineID string
+	meStatus   int
 	search     map[string]searchHit
 	legacy     map[string]searchHit
 	trophies   map[string]Counts
@@ -207,6 +230,10 @@ func newPSNServer(t *testing.T, script psnScript) *httptest.Server {
 		})
 	})
 	mux.HandleFunc("/users/me/profiles", func(w http.ResponseWriter, _ *http.Request) {
+		if script.meStatus != 0 && script.meStatus != http.StatusOK {
+			w.WriteHeader(script.meStatus)
+			return
+		}
 		_ = json.NewEncoder(w).Encode(meProfileJSON{
 			OnlineID: script.meOnlineID,
 			Avatars: []struct {
