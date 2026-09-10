@@ -264,19 +264,31 @@ type searchHit struct {
 }
 
 type psnScript struct {
-	meOnlineID string
-	meStatus   int
-	search     map[string]searchHit
-	legacy     map[string]searchHit
-	trophies   map[string]Counts
-	private    map[string]bool
-	onSearch   func()
+	meOnlineID  string
+	meStatus    int
+	search      map[string]searchHit
+	searchRaw   map[string][]byte
+	legacy      map[string]searchHit
+	legacyRaw   map[string][]byte
+	trophies    map[string]Counts
+	trophyRaw   map[string][]byte
+	private     map[string]bool
+	trophyCode  map[string]int
+	onSearch    func()
+	onAuthorize func()
+	lastUA      *string
 }
 
 func newPSNServer(t *testing.T, script psnScript) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/oauth/authorize", func(w http.ResponseWriter, r *http.Request) {
+		if script.onAuthorize != nil {
+			script.onAuthorize()
+		}
+		if script.lastUA != nil {
+			*script.lastUA = r.Header.Get("User-Agent")
+		}
 		if !strings.Contains(r.Header.Get("Cookie"), "npsso=") {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
@@ -318,7 +330,13 @@ func newPSNServer(t *testing.T, script psnScript) *httptest.Server {
 			SearchTerm string `json:"searchTerm"`
 		}
 		_ = json.Unmarshal(body, &req)
-		hit, ok := script.search[strings.ToLower(req.SearchTerm)]
+		key := strings.ToLower(req.SearchTerm)
+		if raw, ok := script.searchRaw[key]; ok {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write(raw)
+			return
+		}
+		hit, ok := script.search[key]
 		if !ok {
 			_ = json.NewEncoder(w).Encode(map[string]any{"domainResponses": []any{}})
 			return
@@ -341,7 +359,13 @@ func newPSNServer(t *testing.T, script psnScript) *httptest.Server {
 	})
 	mux.HandleFunc("/legacy/", func(w http.ResponseWriter, r *http.Request) {
 		id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/legacy/"), "/profile2")
-		hit, ok := script.legacy[strings.ToLower(id)]
+		key := strings.ToLower(id)
+		if raw, ok := script.legacyRaw[key]; ok {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write(raw)
+			return
+		}
+		hit, ok := script.legacy[key]
 		if !ok {
 			_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"code": 2105356, "message": "User not found"}})
 			return
@@ -358,8 +382,17 @@ func newPSNServer(t *testing.T, script psnScript) *httptest.Server {
 	})
 	mux.HandleFunc("/trophy/v1/users/", func(w http.ResponseWriter, r *http.Request) {
 		accountID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/trophy/v1/users/"), "/trophySummary")
+		if code, ok := script.trophyCode[accountID]; ok {
+			writeTrophyRaw(w, script.trophyRaw[accountID], code)
+			return
+		}
 		if script.private[accountID] {
-			w.WriteHeader(http.StatusForbidden)
+			writeTrophyRaw(w, script.trophyRaw[accountID], http.StatusForbidden)
+			return
+		}
+		if raw, ok := script.trophyRaw[accountID]; ok {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write(raw)
 			return
 		}
 		counts, ok := script.trophies[accountID]
@@ -374,6 +407,16 @@ func newPSNServer(t *testing.T, script psnScript) *httptest.Server {
 	return srv
 }
 
+func writeTrophyRaw(w http.ResponseWriter, raw []byte, code int) {
+	if len(raw) > 0 {
+		w.Header().Set("Content-Type", "application/json")
+	}
+	w.WriteHeader(code)
+	if len(raw) > 0 {
+		_, _ = w.Write(raw)
+	}
+}
+
 func assertNoSecret(t *testing.T, err error) {
 	t.Helper()
 	if err == nil {
@@ -381,5 +424,109 @@ func assertNoSecret(t *testing.T, err error) {
 	}
 	if strings.Contains(err.Error(), secretNPSSO) {
 		t.Fatalf("error leaked NPSSO: %v", err)
+	}
+}
+
+func TestLookupUsesRestyUserAgent(t *testing.T) {
+	t.Parallel()
+	var ua string
+	srv := newPSNServer(t, psnScript{
+		meOnlineID: "operator",
+		search: map[string]searchHit{
+			"cutecleverdevil": {accountID: "111", onlineID: "CuteCleverDevil"},
+		},
+		trophies: map[string]Counts{"111": {Bronze: 1}},
+		lastUA:   &ua,
+	})
+	c := NewWithEndpoints(secretNPSSO, testEndpoints(srv.URL))
+	if _, err := c.Lookup(context.Background(), "cutecleverdevil"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(ua, "go-resty") {
+		t.Fatalf("User-Agent = %q, want go-resty", ua)
+	}
+}
+
+func TestLookupReusesAccessToken(t *testing.T) {
+	t.Parallel()
+	var authHits int
+	srv := newPSNServer(t, psnScript{
+		meOnlineID: "operator",
+		search: map[string]searchHit{
+			"cutecleverdevil": {accountID: "111", onlineID: "CuteCleverDevil"},
+		},
+		trophies:    map[string]Counts{"111": {Bronze: 1}},
+		onAuthorize: func() { authHits++ },
+	})
+	c := NewWithEndpoints(secretNPSSO, testEndpoints(srv.URL))
+	if _, err := c.Lookup(context.Background(), "cutecleverdevil"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Lookup(context.Background(), "cutecleverdevil"); err != nil {
+		t.Fatal(err)
+	}
+	if authHits != 1 {
+		t.Fatalf("authorize hits = %d, want 1", authHits)
+	}
+}
+
+func TestLookupTooManyRequests(t *testing.T) {
+	t.Parallel()
+	srv := newPSNServer(t, psnScript{
+		meOnlineID: "operator",
+		search: map[string]searchHit{
+			"cutecleverdevil": {accountID: "111", onlineID: "CuteCleverDevil"},
+		},
+		trophyCode: map[string]int{"111": http.StatusTooManyRequests},
+	})
+	c := NewWithEndpoints(secretNPSSO, testEndpoints(srv.URL))
+	_, err := c.Lookup(context.Background(), "cutecleverdevil")
+	if !errors.Is(err, kindErr(KindUpstream)) {
+		t.Fatalf("err = %v", err)
+	}
+	assertNoSecret(t, err)
+}
+
+func TestLookupMalformedTrophyJSON(t *testing.T) {
+	t.Parallel()
+	srv := newPSNServer(t, psnScript{
+		meOnlineID: "operator",
+		search: map[string]searchHit{
+			"cutecleverdevil": {accountID: "111", onlineID: "CuteCleverDevil"},
+		},
+		trophyRaw: map[string][]byte{"111": []byte("not-json")},
+	})
+	c := NewWithEndpoints(secretNPSSO, testEndpoints(srv.URL))
+	_, err := c.Lookup(context.Background(), "cutecleverdevil")
+	if !errors.Is(err, kindErr(KindUpstream)) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestLookupNegativeTrophyCounts(t *testing.T) {
+	t.Parallel()
+	srv := newPSNServer(t, psnScript{
+		meOnlineID: "operator",
+		search: map[string]searchHit{
+			"cutecleverdevil": {accountID: "111", onlineID: "CuteCleverDevil"},
+		},
+		trophies: map[string]Counts{"111": {Bronze: -1}},
+	})
+	c := NewWithEndpoints(secretNPSSO, testEndpoints(srv.URL))
+	_, err := c.Lookup(context.Background(), "cutecleverdevil")
+	if !errors.Is(err, kindErr(KindUpstream)) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestLookupContextCanceled(t *testing.T) {
+	t.Parallel()
+	srv := newPSNServer(t, psnScript{meOnlineID: "operator"})
+	c := NewWithEndpoints(secretNPSSO, testEndpoints(srv.URL))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := c.Lookup(ctx, "cutecleverdevil")
+	if !errors.Is(err, kindErr(KindUpstream)) {
+		t.Fatalf("err = %v", err)
 	}
 }

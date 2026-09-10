@@ -2,6 +2,7 @@ package psn
 
 import "errors"
 
+// Kind is a stable lookup failure. Values map 1:1 to user-facing Chinese copy.
 type Kind string
 
 const (

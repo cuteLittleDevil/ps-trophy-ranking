@@ -1,0 +1,50 @@
+{
+  "prefix": "CuteCleverDevil",
+  "query": "CuteCleverDevil",
+  "suggestions": [],
+  "fallbackQueried": false,
+  "domainResponses": [
+    {
+      "domain": "SocialAllAccounts",
+      "domainTitle": "All Players",
+      "next": "",
+      "totalResultCount": 2,
+      "results": [
+        {
+          "id": "SocialAllAccounts:999",
+          "type": "socialAllAccounts",
+          "score": 0.4,
+          "socialMetadata": {
+            "accountId": "999",
+            "onlineId": "CuteCleverDevilFan",
+            "avatarUrl": "https://image.api.playstation.com/other.png",
+            "profilePicUrl": "https://image.api.playstation.com/other.png",
+            "verified": false,
+            "official": false,
+            "aboutMe": "",
+            "country": "US",
+            "language": "en",
+            "isPsPlus": false
+          }
+        },
+        {
+          "id": "SocialAllAccounts:111",
+          "type": "socialAllAccounts",
+          "score": 1,
+          "socialMetadata": {
+            "accountId": "111",
+            "onlineId": "CuteCleverDevil",
+            "avatarUrl": "https://image.api.playstation.com/trophy/xl.png",
+            "profilePicUrl": "https://image.api.playstation.com/trophy/xl.png",
+            "verified": false,
+            "official": false,
+            "aboutMe": "single player",
+            "country": "CN",
+            "language": "zh",
+            "isPsPlus": true
+          }
+        }
+      ]
+    }
+  ]
+}
