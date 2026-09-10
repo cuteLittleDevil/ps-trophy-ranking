@@ -69,6 +69,7 @@ Browser  --HTML form-->  Go HTTP server
 ### 2.4 File Structure
 
 ```
+cmd/psnlookup/main.go           [NEW: 用 NPSSO 按 Online ID 拉奖杯汇总]
 cmd/server/main.go              [NEW]
 internal/config/config.go       [NEW]
 internal/http/server.go         [NEW]
@@ -229,6 +230,21 @@ score = bronze*15 + silver*30 + gold*90 + platinum*300
 **分页**
 
 `offset = (page-1)*50`。`offset >= len` → 空页 + 「没有更多玩家」。切片 `[offset:min(offset+50,len)]`，行上 rank 为全局名次。
+
+**PSN Lookup（US-006）**
+
+对照 [psn-api](https://github.com/achievements-app/psn-api) 与 [andshrew/PlayStation-Trophies](https://andshrew.github.io/PlayStation-Trophies/#/) 的字段，不把 URL 写死到调用代码以外；行为顺序固定：
+
+1. `PSN_NPSSO` 为空 → `no_credentials`，不访问网络
+2. NPSSO 换 access code（`oauth/authorize`，读 302 `Location` 的 `code`），再换 access / refresh token；失败 → `invalid_credentials`
+3. access token 进程内缓存，过期前 60 秒刷新；禁止把 NPSSO / token 写入日志或 `error` 字符串
+4. `GET .../users/me/profiles`：若返回 400/404（该接口不接受 `me`），忽略并继续；若 `onlineId` 与目标 ID 大小写相同，accountId 用 `me`
+5. 否则 `POST .../search/v1/universalSearch`，`domain=SocialAllAccounts`，只接受 `onlineId` 精确匹配（忽略大小写）
+6. 搜索无精确命中则回退 legacy `.../users/{id}/profile2`；仍无 `accountId` → `not_found`
+7. `GET .../trophy/v1/users/{accountId}/trophySummary` 取 `earnedTrophies`；403 → `private`；404 → `not_found`；429 / 5xx / 超时 / 负计数 → `upstream`
+8. 积分仍按本地公式计算，不直接采用上游 `trophyPoint`
+
+本地验收命令：`PSN_NPSSO=... go run ./cmd/psnlookup <online-id>`。无凭证时不验收真实网络。`go run ./cmd/psnlookup --raw <online-id>` 打印非鉴权接口的完整响应 JSON，禁止 dump oauth `/token` 与 NPSSO。
 
 **入榜**
 
@@ -430,7 +446,7 @@ v1 本地演示：个位数并发、最多数百行。上万并发不在范围�
 
 ### 11.3 Assumptions
 
-- 实现用 Go 1.22+ 语法即可；`go.mod` 已写 `1.27rc1` 时按该模块版本构建
+- 实现用 Go 1.22 语法；`go.mod` 与本机 toolchain 对齐，不升到当前下不下来的 RC
 - 对照文档实现 PSN：[psn-api](https://github.com/achievements-app/psn-api)、[PSNAWP](https://github.com/isFakeAccount/psnawp)、[andshrew/PlayStation-Trophies](https://github.com/andshrew/PlayStation-Trophies)；逐字段核对，不把「看起来能用」当完成
 - fixture 内置 3 个 ID（建议 `fixture_alpha` / `fixture_bravo` / `fixture_charlie`），积分必须可区分且测试写死期望值
 - 任务临时文件仍按全局规范放 `.tmp/<task-slug>/`，与 SQLite 数据文件分开
