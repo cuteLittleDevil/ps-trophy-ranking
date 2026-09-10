@@ -1,0 +1,15 @@
+{
+  "accountId": "0000000000000000000",
+  "trophyLevel": 437,
+  "trophyPoint": 200430,
+  "trophyLevelBasePoint": 199890,
+  "trophyLevelNextPoint": 201240,
+  "progress": 40,
+  "tier": 5,
+  "earnedTrophies": {
+    "bronze": 6212,
+    "silver": 1450,
+    "gold": 525,
+    "platinum": 55
+  }
+}

@@ -1,0 +1,35 @@
+{
+  "profile": {
+    "onlineId": "LegacyID",
+    "npId": "TGVnYWN5SUQ=",
+    "accountId": "333",
+    "avatarUrls": [
+      {
+        "size": "s",
+        "avatarUrl": "https://static-resource.np.community.playstation.net/avatar_s.png"
+      },
+      {
+        "size": "xl",
+        "avatarUrl": "https://static-resource.np.community.playstation.net/avatar_xl.png"
+      }
+    ],
+    "plus": 1,
+    "aboutMe": "",
+    "languagesUsed": ["en"],
+    "trophySummary": {
+      "level": 12,
+      "progress": 40,
+      "earnedTrophies": {
+        "platinum": 0,
+        "gold": 0,
+        "silver": 0,
+        "bronze": 1
+      }
+    },
+    "isOfficiallyVerified": false,
+    "personalDetail": {
+      "firstName": "",
+      "lastName": ""
+    }
+  }
+}

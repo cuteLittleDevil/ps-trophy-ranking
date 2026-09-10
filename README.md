@@ -43,8 +43,29 @@ go run ./cmd/psnlookup --raw cutecleverdevil
 
 本工具只用 `earnedTrophies`，积分按本地公式 `铜*15 + 银*30 + 金*90 + 白金*300` 计算，不采用上游 `trophyPoint`。`--raw` 不会打印 NPSSO 或 access token。
 
+## 测试
+
+```bash
+go test ./...
+```
+
+`internal/psn/testdata/` 里是索尼文档形态的**完整 JSON**（trophySummary / universalSearch / legacy profile）。默认测试用 httptest 回放这些文件，断言 dump 与 `Summary.TrophyJSON` 和金样字节一致，不访问外网。
+
+要对真实索尼接口抓完整 JSON：
+
+```bash
+PSN_LIVE=1 go test ./internal/psn -run TestLiveSonyCompleteJSON -v
+```
+
+需要 `PSN_NPSSO` 环境变量或根目录 `.env`。测试日志会打印完整响应，不会打印 token。
+
+HTTP 客户端使用 `github.com/go-resty/resty/v2`。
+
+调用顺序见 `docs/flowchart.html`（NPSSO → token → accountId → trophySummary）。
+
 ## 文档
 
 - 产品需求：`tasks/prd-psn-trophy-leaderboard.md`
 - 技术方案：`tasks/spec-psn-trophy-leaderboard.md`
 - 进度：`ROADMAP.md`
+- 奖杯拉取流程：`docs/flowchart.html`

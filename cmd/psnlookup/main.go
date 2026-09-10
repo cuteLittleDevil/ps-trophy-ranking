@@ -1,3 +1,7 @@
+// Command psnlookup prints trophy counts for one PSN Online ID.
+//
+// NPSSO comes from PSN_NPSSO or .env. --raw prints complete Sony JSON
+// (search / profile / trophySummary) and never prints tokens.
 package main
 
 import (
