@@ -16,9 +16,10 @@ v1 排行榜页面未做。已完成按 Online ID 拉取奖杯汇总的 PSN 客�
 
 ## 最近验证
 
+- 2026-09-10 22:14 真实查询 `cutecleverdevil`：白金 14、金 48、银 144、铜 636、积分 22380；与 PSNINE 公开页数字一致
 - 2026-09-10 22:11 `go test ./...`：`internal/psn` 与 `cmd/psnlookup` 通过
 - 2026-09-10 22:11 `.env` 已被 gitignore，不会进入提交
 
 ## 待确认
 
-- 真实 `cutecleverdevil` 查询结果以本机配置 NPSSO 后的 CLI 输出为准
+- 真实 `cutecleverdevil` 查询已通过（见「最近验证」）
