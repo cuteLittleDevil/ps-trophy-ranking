@@ -2,6 +2,7 @@ package http
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -9,7 +10,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"ps-trophy-ranking/internal/player"
 	"ps-trophy-ranking/internal/trophy"
@@ -264,7 +264,7 @@ func TestJoinRejectsNegativeCounts(t *testing.T) {
 
 	templatesFS := os.DirFS("../../web/templates")
 	staticFS := os.DirFS("../../web/static")
-	server, _ := New(store, negSource, "test", templatesFS, staticFS)
+	server, _ := New(store, negSource, templatesFS, staticFS)
 
 	form := url.Values{}
 	form.Set("online_id", "baduser")
@@ -328,7 +328,7 @@ func TestJoinValidatesAvatarURL(t *testing.T) {
 
 			templatesFS := os.DirFS("../../web/templates")
 			staticFS := os.DirFS("../../web/static")
-			srv, _ := New(tmpStore, testSrc, "test", templatesFS, staticFS)
+			srv, _ := New(tmpStore, testSrc, templatesFS, staticFS)
 
 			form := url.Values{}
 			form.Set("online_id", "testuser")
@@ -399,12 +399,27 @@ func setupTestServer(t *testing.T) (*Server, *player.Store) {
 		t.Fatalf("open store: %v", err)
 	}
 
-	source := trophy.NewFixture()
+	// Create test source with fixture-like data
+	source := &testSource{
+		lookups: map[string]*trophy.Summary{
+			"fixture_alpha": {
+				OnlineID:  "fixture_alpha",
+				DisplayID: "Fixture_Alpha",
+				AvatarURL: "",
+				Counts: trophy.Counts{
+					Bronze:   1000,
+					Silver:   500,
+					Gold:     200,
+					Platinum: 50,
+				},
+			},
+		},
+	}
 
 	templatesFS := os.DirFS("../../web/templates")
 	staticFS := os.DirFS("../../web/static")
 
-	server, err := New(store, source, "test", templatesFS, staticFS)
+	server, err := New(store, source, templatesFS, staticFS)
 	if err != nil {
 		t.Fatalf("create server: %v", err)
 	}
@@ -428,6 +443,169 @@ func (ts *testSource) Lookup(ctx context.Context, onlineID string) (*trophy.Summ
 	return s, nil
 }
 
-func (ts *testSource) LastSync(onlineID string) time.Time {
-	return time.Time{}
+func TestAdminSeedSuccess(t *testing.T) {
+	server, store := setupTestServer(t)
+	defer store.Close()
+
+	form := url.Values{}
+	form.Set("count", "5")
+
+	req := httptest.NewRequest("POST", "/admin/seed", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.RemoteAddr = "127.0.0.1:12345" // Loopback
+	w := httptest.NewRecorder()
+	server.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var resp map[string]interface{}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	if !resp["ok"].(bool) {
+		t.Error("expected ok=true")
+	}
+
+	inserted := int(resp["inserted"].(float64))
+	if inserted != 5 {
+		t.Errorf("inserted = %d, want 5", inserted)
+	}
+
+	// Check IDs are in correct format and length
+	players, _ := store.ListAll()
+	for _, p := range players {
+		if !strings.HasPrefix(p.OnlineID, "sim") {
+			t.Errorf("online_id = %s, want prefix 'sim'", p.OnlineID)
+		}
+		if len(p.OnlineID) < 3 || len(p.OnlineID) > 16 {
+			t.Errorf("online_id length = %d, must be 3-16", len(p.OnlineID))
+		}
+	}
+}
+
+func TestAdminSeedInvalidCount(t *testing.T) {
+	server, store := setupTestServer(t)
+	defer store.Close()
+
+	tests := []struct {
+		name  string
+		count string
+	}{
+		{"zero", "0"},
+		{"negative", "-1"},
+		{"non-numeric", "abc"},
+		{"empty", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			form := url.Values{}
+			if tt.count != "" {
+				form.Set("count", tt.count)
+			}
+
+			req := httptest.NewRequest("POST", "/admin/seed", strings.NewReader(form.Encode()))
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			req.RemoteAddr = "127.0.0.1:12345"
+			w := httptest.NewRecorder()
+			server.Handler().ServeHTTP(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Errorf("status = %d, want %d", w.Code, http.StatusBadRequest)
+			}
+
+			var resp map[string]interface{}
+			json.NewDecoder(w.Body).Decode(&resp)
+			if resp["ok"] != false {
+				t.Error("expected ok=false")
+			}
+		})
+	}
+}
+
+func TestAdminSeedExceedsMax(t *testing.T) {
+	server, store := setupTestServer(t)
+	defer store.Close()
+
+	form := url.Values{}
+	form.Set("count", "1001") // Exceeds maxSeedCount (1000)
+
+	req := httptest.NewRequest("POST", "/admin/seed", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.RemoteAddr = "127.0.0.1:12345"
+	w := httptest.NewRecorder()
+	server.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	if resp["ok"] != false {
+		t.Error("expected ok=false")
+	}
+	if !strings.Contains(resp["error"].(string), "maximum") {
+		t.Errorf("error message should mention maximum, got: %s", resp["error"])
+	}
+}
+
+func TestAdminSeedCumulative(t *testing.T) {
+	server, store := setupTestServer(t)
+	defer store.Close()
+
+	// First seed
+	form := url.Values{}
+	form.Set("count", "3")
+	req := httptest.NewRequest("POST", "/admin/seed", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.RemoteAddr = "127.0.0.1:12345"
+	w := httptest.NewRecorder()
+	server.Handler().ServeHTTP(w, req)
+
+	players1, _ := store.ListAll()
+	count1 := len(players1)
+
+	// Second seed
+	form = url.Values{}
+	form.Set("count", "2")
+	req = httptest.NewRequest("POST", "/admin/seed", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.RemoteAddr = "127.0.0.1:12345"
+	w = httptest.NewRecorder()
+	server.Handler().ServeHTTP(w, req)
+
+	players2, _ := store.ListAll()
+	count2 := len(players2)
+
+	if count2 != count1+2 {
+		t.Errorf("second seed should add to existing, got %d want %d", count2, count1+2)
+	}
+}
+
+func TestAdminSeedNonLoopback(t *testing.T) {
+	server, store := setupTestServer(t)
+	defer store.Close()
+
+	form := url.Values{}
+	form.Set("count", "5")
+
+	req := httptest.NewRequest("POST", "/admin/seed", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.RemoteAddr = "192.168.1.100:54321" // Non-loopback
+	w := httptest.NewRecorder()
+	server.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want %d (Forbidden)", w.Code, http.StatusForbidden)
+	}
+
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	if resp["ok"] != false {
+		t.Error("expected ok=false for non-loopback access")
+	}
 }

@@ -18,9 +18,12 @@ func main() {
 	cfg := config.Load()
 
 	log.Printf("Starting PSN Trophy Leaderboard server")
-	log.Printf("Data source: %s", cfg.PSNMode)
 	log.Printf("Database: %s", cfg.DBPath)
 	log.Printf("Listen address: %s", cfg.ListenAddr)
+
+	if cfg.PSNNPSSO == "" {
+		log.Println("Warning: PSN_NPSSO not set. /join endpoint will return 'no_credentials' error.")
+	}
 
 	if err := os.MkdirAll(filepath.Dir(cfg.DBPath), 0755); err != nil {
 		log.Fatalf("create data directory: %v", err)
@@ -32,27 +35,12 @@ func main() {
 	}
 	defer store.Close()
 
-	var source trophy.Source
-	var dataSourceLabel string
-
-	switch cfg.PSNMode {
-	case "psn":
-		if cfg.PSNNPSSO == "" {
-			log.Println("Warning: PSN mode selected but PSN_NPSSO not set")
-		}
-		client := psn.New(cfg.PSNNPSSO)
-		source = trophy.NewPSN(client)
-		dataSourceLabel = "PSN 真实档案"
-	case "fixture":
-		source = trophy.NewFixture()
-		dataSourceLabel = "演示数据"
-	default:
-		log.Fatalf("invalid PSN_MODE: %s (must be 'fixture' or 'psn')", cfg.PSNMode)
-	}
+	client := psn.New(cfg.PSNNPSSO)
+	source := trophy.NewPSN(client)
 
 	templatesFS, staticFS := getWebFS()
 
-	server, err := httpserver.New(store, source, dataSourceLabel, templatesFS, staticFS)
+	server, err := httpserver.New(store, source, templatesFS, staticFS)
 	if err != nil {
 		log.Fatalf("create HTTP server: %v", err)
 	}

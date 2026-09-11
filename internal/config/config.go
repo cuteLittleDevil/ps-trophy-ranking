@@ -8,9 +8,7 @@ import (
 
 // Config holds server configuration.
 type Config struct {
-	// PSNMode: "fixture" or "psn". Default: "fixture".
-	PSNMode string
-	// PSNNPSSO is the Sony NPSSO cookie for real mode. Optional.
+	// PSNNPSSO is the Sony NPSSO cookie. Required for /join endpoint.
 	PSNNPSSO string
 	// DBPath is the SQLite database file path. Default: "./data/leaderboard.db".
 	DBPath string
@@ -23,7 +21,6 @@ func Load() Config {
 	loadDotEnv()
 
 	cfg := Config{
-		PSNMode:    getEnv("PSN_MODE", "fixture"),
 		PSNNPSSO:   os.Getenv("PSN_NPSSO"),
 		DBPath:     getEnv("DB_PATH", "./data/leaderboard.db"),
 		ListenAddr: getEnv("LISTEN_ADDR", "127.0.0.1:8080"),

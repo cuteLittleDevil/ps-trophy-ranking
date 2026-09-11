@@ -2,6 +2,8 @@
 
 > Technical specification derived from: `tasks/prd-psn-trophy-leaderboard.md`
 > Generated: 2026-09-10 | Target branch: main | Commit: 2f300c4
+>
+> **架构变更 (2026-09-11)**: 删除 fixture 演示模式，`/join` 仅走真实 PSN。新增 `/admin/seed` HTTP 管理灌数接口（追加模拟用户，压测/演示用）。去掉 `PSN_MODE` 配置。本 SPEC 原文保留以供参考，新架构见 ROADMAP.md。
 
 ## 1. Summary
 

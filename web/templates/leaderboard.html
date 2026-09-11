@@ -63,9 +63,15 @@
                     <tr{{if .IsYou}} class="is-you"{{end}}>
                         <td class="rank-col">{{.Rank}}{{if .IsYou}}<span class="you-badge">你</span>{{end}}</td>
                         <td class="avatar-col">
-                            <img src="{{if .AvatarURL}}{{.AvatarURL}}{{else}}/static/placeholder.png{{end}}" 
+                            {{if and .AvatarURL (hasPrefix .AvatarURL "https://")}}
+                            <img src="{{.AvatarURL}}" 
                                  alt="{{.DisplayID}}" 
                                  onerror="this.src='/static/placeholder.png'">
+                            {{else if and .AvatarURL (hasPrefix .AvatarURL "letter:")}}
+                            <div class="avatar-letter">{{trimPrefix .AvatarURL "letter:"}}</div>
+                            {{else}}
+                            <img src="/static/placeholder.png" alt="{{.DisplayID}}">
+                            {{end}}
                         </td>
                         <td class="id-col">{{.DisplayID}}</td>
                         <td class="trophy-col platinum">{{.Platinum}}</td>
@@ -104,7 +110,7 @@
 
         <footer>
             <p>积分公式：铜×15 + 银×30 + 金×90 + 白金×300</p>
-            <p>数据源：{{.DataSource}}</p>
+            <p>数据源：PSN 真实档案</p>
         </footer>
     </div>
 </body>
