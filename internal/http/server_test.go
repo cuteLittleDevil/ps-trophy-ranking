@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"ps-trophy-ranking/internal/player"
 	"ps-trophy-ranking/internal/trophy"
@@ -607,5 +608,267 @@ func TestAdminSeedNonLoopback(t *testing.T) {
 	json.NewDecoder(w.Body).Decode(&resp)
 	if resp["ok"] != false {
 		t.Error("expected ok=false for non-loopback access")
+	}
+}
+
+func TestRefreshSuccess(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+	store, err := player.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	// Setup: Insert a player first using Upsert (it will set joined_at and synced_at automatically)
+	now := time.Now()
+	p := player.Player{
+		OnlineID:  "testuser",
+		DisplayID: "TestUser",
+		Bronze:    100,
+		Silver:    50,
+		Gold:      20,
+		Platinum:  5,
+		Score:     4000,
+	}
+	if err := store.Upsert(p); err != nil {
+		t.Fatalf("setup upsert: %v", err)
+	}
+
+	// Update synced_at to be past cooldown (20 minutes ago)
+	if err := store.UpdateSyncedAt("testuser", now.Add(-20*time.Minute)); err != nil {
+		t.Fatalf("update synced_at: %v", err)
+	}
+
+	// Create test source with updated trophy counts
+	testSrc := &testSource{
+		lookups: map[string]*trophy.Summary{
+			"testuser": {
+				OnlineID:  "testuser",
+				DisplayID: "TestUser",
+				AvatarURL: "",
+				Counts: trophy.Counts{
+					Bronze:   150,
+					Silver:   60,
+					Gold:     25,
+					Platinum: 6,
+				},
+			},
+		},
+	}
+
+	templatesFS := os.DirFS("../../web/templates")
+	staticFS := os.DirFS("../../web/static")
+	server, _ := New(store, testSrc, templatesFS, staticFS)
+
+	form := url.Values{}
+	form.Set("online_id", "testuser")
+
+	req := httptest.NewRequest("POST", "/refresh", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	server.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusSeeOther {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusSeeOther)
+		t.Logf("Response body: %s", w.Body.String())
+		t.FailNow()
+	}
+
+	location := w.Header().Get("Location")
+	if !strings.Contains(location, "highlight=testuser") {
+		t.Errorf("location = %q, want highlight", location)
+	}
+
+	// Verify player was updated
+	updated, _ := store.Get("testuser")
+	if updated == nil {
+		t.Fatal("player should exist")
+	}
+	if updated.Bronze != 150 {
+		t.Errorf("bronze = %d, want 150", updated.Bronze)
+	}
+	if updated.Platinum != 6 {
+		t.Errorf("platinum = %d, want 6", updated.Platinum)
+	}
+}
+
+func TestRefreshNotOnBoard(t *testing.T) {
+	server, store := setupTestServer(t)
+	defer store.Close()
+
+	form := url.Values{}
+	form.Set("online_id", "notinboard")
+
+	req := httptest.NewRequest("POST", "/refresh", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	server.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	body := w.Body.String()
+	if !strings.Contains(body, "该玩家尚未入榜") {
+		t.Error("expected not on board message")
+	}
+}
+
+func TestRefreshCooldown(t *testing.T) {
+	server, store := setupTestServer(t)
+	defer store.Close()
+
+	// Setup: Insert a player with recent sync
+	p := player.Player{
+		OnlineID:  "cooldownuser",
+		DisplayID: "CooldownUser",
+		Bronze:    100,
+		Silver:    50,
+		Gold:      20,
+		Platinum:  5,
+		Score:     4000,
+	}
+	if err := store.Upsert(p); err != nil {
+		t.Fatalf("setup upsert: %v", err)
+	}
+
+	form := url.Values{}
+	form.Set("online_id", "cooldownuser")
+
+	req := httptest.NewRequest("POST", "/refresh", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	server.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	body := w.Body.String()
+	if !strings.Contains(body, "同步过于频繁") {
+		t.Error("expected cooldown message")
+	}
+}
+
+func TestRefreshInvalidID(t *testing.T) {
+	server, store := setupTestServer(t)
+	defer store.Close()
+
+	tests := []struct {
+		name  string
+		id    string
+		wants string
+	}{
+		{"empty", "", "请输入 PSN Online ID"},
+		{"too short", "ab", "PSN Online ID 须为 3–16 位"},
+		{"invalid chars", "test@user", "PSN Online ID 须为 3–16 位"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			form := url.Values{}
+			form.Set("online_id", tt.id)
+
+			req := httptest.NewRequest("POST", "/refresh", strings.NewReader(form.Encode()))
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			w := httptest.NewRecorder()
+			server.Handler().ServeHTTP(w, req)
+
+			if w.Code != http.StatusOK {
+				t.Errorf("status = %d, want %d", w.Code, http.StatusOK)
+			}
+
+			body := w.Body.String()
+			if !strings.Contains(body, tt.wants) {
+				t.Errorf("expected error message %q in response", tt.wants)
+			}
+		})
+	}
+}
+
+func TestRefreshPreservesJoinedAt(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+	store, err := player.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	// Setup: Insert a player first
+	p := player.Player{
+		OnlineID:  "olduser",
+		DisplayID: "OldUser",
+		Bronze:    100,
+		Silver:    50,
+		Gold:      20,
+		Platinum:  5,
+		Score:     4000,
+	}
+	if err := store.Upsert(p); err != nil {
+		t.Fatalf("setup upsert: %v", err)
+	}
+
+	// Get the player to capture the original joined_at
+	original, err := store.Get("olduser")
+	if err != nil || original == nil {
+		t.Fatalf("get original player: %v", err)
+	}
+	originalJoinedAt := original.JoinedAt
+
+	// Update synced_at to be past cooldown (20 minutes ago)
+	now := time.Now()
+	if err := store.UpdateSyncedAt("olduser", now.Add(-20*time.Minute)); err != nil {
+		t.Fatalf("update synced_at: %v", err)
+	}
+
+	// Create test source with updated trophy counts
+	testSrc := &testSource{
+		lookups: map[string]*trophy.Summary{
+			"olduser": {
+				OnlineID:  "olduser",
+				DisplayID: "OldUser",
+				AvatarURL: "",
+				Counts: trophy.Counts{
+					Bronze:   200,
+					Silver:   100,
+					Gold:     40,
+					Platinum: 10,
+				},
+			},
+		},
+	}
+
+	templatesFS := os.DirFS("../../web/templates")
+	staticFS := os.DirFS("../../web/static")
+	server, _ := New(store, testSrc, templatesFS, staticFS)
+
+	form := url.Values{}
+	form.Set("online_id", "olduser")
+
+	req := httptest.NewRequest("POST", "/refresh", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	server.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusSeeOther {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusSeeOther)
+	}
+
+	// Verify joined_at was preserved
+	updated, _ := store.Get("olduser")
+	if updated == nil {
+		t.Fatal("player should exist")
+	}
+
+	// Check that joined_at is exactly the same (should be preserved by Upsert)
+	if !updated.JoinedAt.Equal(originalJoinedAt) {
+		t.Errorf("joined_at changed: original=%v, updated=%v", originalJoinedAt, updated.JoinedAt)
+	}
+
+	// Check that trophy counts were updated
+	if updated.Bronze != 200 {
+		t.Errorf("bronze = %d, want 200", updated.Bronze)
 	}
 }

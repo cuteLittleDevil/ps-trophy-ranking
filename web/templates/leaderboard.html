@@ -28,8 +28,8 @@
         <div class="actions">
             <form method="POST" action="/join" class="join-form">
                 <label for="online_id">加入排行榜</label>
-                <input type="text" name="online_id" id="online_id" placeholder="输入 PSN Online ID" value="{{.InputID}}" required>
-                <button type="submit">入榜</button>
+                <input type="text" name="online_id" id="online_id" placeholder="输入 PSN Online ID（入榜或更新）" value="{{.InputID}}" required>
+                <button type="submit">入榜/更新</button>
             </form>
 
             <form method="GET" action="/search" class="search-form">
@@ -56,6 +56,7 @@
                         <th class="trophy-col silver">银</th>
                         <th class="trophy-col bronze">铜</th>
                         <th class="score-col">积分</th>
+                        <th class="action-col">操作</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -80,6 +81,14 @@
                         <td class="trophy-col silver">{{.Silver}}</td>
                         <td class="trophy-col bronze">{{.Bronze}}</td>
                         <td class="score-col">{{.Score}}</td>
+                        <td class="action-col">
+                            {{if not (hasPrefix .OnlineID "sim")}}
+                            <form method="POST" action="/refresh" style="display:inline;">
+                                <input type="hidden" name="online_id" value="{{.OnlineID}}">
+                                <button type="submit" class="refresh-btn">刷新</button>
+                            </form>
+                            {{end}}
+                        </td>
                     </tr>
                     {{end}}
                 </tbody>

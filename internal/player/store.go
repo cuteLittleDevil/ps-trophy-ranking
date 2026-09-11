@@ -166,3 +166,14 @@ func (s *Store) ListAll() ([]Player, error) {
 	}
 	return players, rows.Err()
 }
+
+// UpdateSyncedAt updates the synced_at timestamp for a player (test helper).
+func (s *Store) UpdateSyncedAt(onlineID string, syncedAt time.Time) error {
+	_, err := s.db.Exec(`
+		UPDATE players SET synced_at = ? WHERE online_id = ?
+	`, syncedAt.UTC().Format(time.RFC3339), strings.ToLower(onlineID))
+	if err != nil {
+		return fmt.Errorf("update synced_at: %w", err)
+	}
+	return nil
+}
