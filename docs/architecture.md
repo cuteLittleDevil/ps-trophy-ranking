@@ -388,6 +388,19 @@ sequenceDiagram
 - 根据新分数与门槛分判断：`score > 门槛分` → 热路径；否则 → 冷路径
 - 保证高分冲榜玩家实时可见，低分玩家异步批量
 
+### 8.4 SQLite 批量事务 Upsert（下一步候选，未拍板）
+
+**当前实现**：
+- WAL flush 时仍逐条 `store.Upsert`（单条事务）
+- pprof 显示排序已优化后，syscall/I/O 嫌疑大
+
+**未来可选**：
+- 单事务批量 Upsert（减少 fsync 次数）
+- WAL bufio（减少系统调用）
+- SQLite pragma 调优（如 `journal_mode=WAL`、`synchronous=NORMAL`）
+
+**待观测与讨论**：方案需进一步 pprof 验证与性能测试
+
 ---
 
 ## 9. 相关文档

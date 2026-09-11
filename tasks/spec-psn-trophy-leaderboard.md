@@ -578,6 +578,7 @@ v1 已在 main 交付（PR #4–#10，见 `提交历史说明.md`）。实现顺
 
 - 运营侧 NPSSO 是否在演示环境提供？不提供则验收 seed + fake round-tripper + 未配置凭证失败态。
 - 第 12 节记录的是 2026-09-10 现场核对过的非官方端点与字段。URL 若变更，以社区文档 + `--raw` 再核对；**匹配规则与取哪些字段**是契约，不随 URL 漂移而放宽。
+- **SQLite 批量事务 Upsert**（下一步候选，未拍板）：当前 WAL flush 仍逐条 `store.Upsert`；pprof 显示排序已优化后，syscall/I/O 嫌疑大；是否改为单事务批量 Upsert、WAL bufio、SQLite pragma 调优需进一步观测与讨论。
 
 ### 11.2 Technical Risks
 
@@ -900,8 +901,9 @@ score > 门槛分？
    - 同一 `online_id` 可能有多条事件（例如模拟灌数时重复更新）；**只保留 `event_ts` 最新的一条**（或用单调递增 `seq` 字段判断）
 
 3. **批量 Upsert SQLite**：
-   - **在锁外执行**批量 Upsert 到 SQLite（例如：`INSERT ... ON CONFLICT(online_id) DO UPDATE SET ...`）
-   - 使用事务减少 fsync 次数
+   - **在锁外执行** Upsert 到 SQLite
+   - **当前实现**：逐条 `store.Upsert`（单条事务）
+   - **下一步候选（未拍板）**：单事务批量 Upsert、WAL bufio、SQLite pragma 调优（pprof 显示排序已优化后，syscall/I/O 嫌疑大，方案待讨论）
 
 4. **更新内存与 Top1000**：
    - **在锁外更新**全量内存结构（或使用专用内存锁，避免阻塞 WAL 写入）
@@ -1062,7 +1064,7 @@ score > 门槛分？
    - **验收**：读性能提升；写入仍为 v1 水平
    - **实现模块**：`internal/memrank` 封装内存排行榜；HTTP 层集成
    
-   **Phase 1+ 排序优化** ✅ **已落地（当前 PR）**
+   **Phase 1+ 排序优化** ✅ **已落地（2026-09-11 PR #16）**
    - **优化 A**：`internal/rank.SortAndNumber` 使用标准库 `slices.SortFunc`，O(N log N) 替代 O(N²) 插入排序
    - **优化 B**：`internal/memrank.UpsertBatch` 使用有序合并（ordered merge）而非全量重排序
      - WAL flush 批量更新时：移除旧项 → 排序批次 → 二路归并 → 重新分配竞赛名次
@@ -1071,7 +1073,7 @@ score > 门槛分？
    - 新增大数据量测试（1k-50k）确保性能改善
    - **验收**：1 万～10 万量级 rebuild/flush 不再卡在插入排序；所有测试通过
 
-2. **Phase 2**：冷路径 WAL + 封段刷盘 ✅ **已落地（2026-09-11）**
+2. **Phase 2**：冷路径 WAL + 封段刷盘 ✅ **已落地（2026-09-11 PR #13）**
    - 去除 `/admin/seed` count 上限（仍须正整数）
    - 模拟数据追加到 10 个 hash 分片文件（`data/wal/shard-N.log`）
    - 封段 Worker：每 100ms rename 为 sealed，读取去重，批量 Upsert SQLite + 内存，删除 sealed
@@ -1079,11 +1081,10 @@ score > 门槛分？
    - `/join` `/refresh` 仍同步写库（热路径），seed 走 WAL（冷路径）
    - **验收**：`/admin/seed` 支持大批量灌数（如 10000+）；入队即返回 JSON（enqueued/failed）；可见延迟约 100ms-1s
 
-3. **Phase 3**：崩溃恢复 + 可观测（待实现）
-   - 启动重放 sealed 段
-   - 暴露 Prometheus metrics
-   - 增加反压与告警
-   - **验收**：重启后数据完整；监控面板可用
+3. **Phase 3**：Prometheus metrics + 反压（待实现）
+   - 暴露 Prometheus metrics（写入 QPS、WAL 状态、刷盘性能、Top1000 门槛分等，见 §13.7.2）
+   - 增加反压与告警（sealed 段积压超阈值触发反压）
+   - **验收**：监控面板可用，反压机制生效
 
 4. **Phase 4（可选 follow-up）**：热路径 micro-batch（待实现）
    - 若观测到热路径仍有冲击，增加 10ms 窗口聚合
