@@ -3,7 +3,6 @@ package trophy
 import (
 	"context"
 	"strings"
-	"time"
 )
 
 // Fixture is a trophy source with hardcoded demo players. No cooldown, no network.
@@ -60,9 +59,4 @@ func (f *Fixture) Lookup(ctx context.Context, onlineID string) (*Summary, error)
 		return nil, NewError(KindNotFound)
 	}
 	return &p, nil
-}
-
-// LastSync always returns zero (no cooldown for fixture).
-func (f *Fixture) LastSync(onlineID string) time.Time {
-	return time.Time{}
 }

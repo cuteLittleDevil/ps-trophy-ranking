@@ -10,11 +10,19 @@ import (
 
 func TestValidOnlineID(t *testing.T) {
 	t.Parallel()
-	if !validOnlineID("cutecleverdevil") {
-		t.Fatal("cutecleverdevil must be valid")
+	
+	valid := []string{"cutecleverdevil", "123test", "test-user", "user_name", "abc"}
+	for _, id := range valid {
+		if !validOnlineID(id) {
+			t.Errorf("%q should be valid", id)
+		}
 	}
-	if validOnlineID("ab") || validOnlineID("1abc") || validOnlineID("bad id") {
-		t.Fatal("invalid IDs accepted")
+	
+	invalid := []string{"ab", "bad id", "user@name", "17characterslimit", ""}
+	for _, id := range invalid {
+		if validOnlineID(id) {
+			t.Errorf("%q should be invalid", id)
+		}
 	}
 }
 

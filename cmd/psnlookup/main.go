@@ -27,7 +27,7 @@ func main() {
 		os.Exit(0)
 	}
 	if !validOnlineID(onlineID) {
-		fmt.Fprintln(os.Stderr, "PSN Online ID 须为 3–16 位，且以字母开头，只含字母、数字、连字符或下划线")
+		fmt.Fprintln(os.Stderr, "PSN Online ID 须为 3–16 位字母、数字、连字符或下划线")
 		os.Exit(2)
 	}
 
@@ -109,10 +109,6 @@ func prettyJSON(body []byte) string {
 
 func validOnlineID(id string) bool {
 	if len(id) < 3 || len(id) > 16 {
-		return false
-	}
-	first := id[0]
-	if (first < 'A' || first > 'Z') && (first < 'a' || first > 'z') {
 		return false
 	}
 	for i := 0; i < len(id); i++ {

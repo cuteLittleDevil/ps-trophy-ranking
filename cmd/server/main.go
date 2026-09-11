@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"time"
 
 	"ps-trophy-ranking/internal/config"
 	httpserver "ps-trophy-ranking/internal/http"
@@ -42,7 +41,7 @@ func main() {
 			log.Println("Warning: PSN mode selected but PSN_NPSSO not set")
 		}
 		client := psn.New(cfg.PSNNPSSO)
-		source = trophy.NewPSN(client, 15*time.Minute)
+		source = trophy.NewPSN(client)
 		dataSourceLabel = "PSN 真实档案"
 	case "fixture":
 		source = trophy.NewFixture()

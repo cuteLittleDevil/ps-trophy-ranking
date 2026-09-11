@@ -68,9 +68,17 @@ func TestFixtureCaseInsensitive(t *testing.T) {
 
 func TestFixtureNoCooldown(t *testing.T) {
 	f := NewFixture()
-	lastSync := f.LastSync("fixture_alpha")
-	if !lastSync.IsZero() {
-		t.Errorf("LastSync should return zero time, got %v", lastSync)
+	ctx := context.Background()
+	
+	// Fixture mode: no cooldown, can call multiple times
+	_, err := f.Lookup(ctx, "fixture_alpha")
+	if err != nil {
+		t.Fatalf("first lookup: %v", err)
+	}
+	
+	_, err = f.Lookup(ctx, "fixture_alpha")
+	if err != nil {
+		t.Fatalf("second lookup should succeed: %v", err)
 	}
 }
 

@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/url"
 	"ps-trophy-ranking/internal/player"
-	"ps-trophy-ranking/internal/psn"
 	"ps-trophy-ranking/internal/rank"
 	"ps-trophy-ranking/internal/trophy"
 	"regexp"
@@ -181,6 +180,18 @@ func (s *Server) handleJoin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check store-based cooldown for real PSN mode (fixture has no cooldown)
+	if s.dataSource != "演示数据" {
+		existing, err := s.store.Get(onlineID)
+		if err != nil {
+			log.Printf("check cooldown: %v", err)
+		}
+		if existing != nil && time.Since(existing.SyncedAt) < 15*time.Minute {
+			s.renderError(w, "同步过于频繁", onlineID)
+			return
+		}
+	}
+
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
 
@@ -199,7 +210,7 @@ func (s *Server) handleJoin(w http.ResponseWriter, r *http.Request) {
 		Silver:    summary.Silver,
 		Gold:      summary.Gold,
 		Platinum:  summary.Platinum,
-		Score:     psn.Score(summary.Bronze, summary.Silver, summary.Gold, summary.Platinum),
+		Score:     rank.Score(summary.Bronze, summary.Silver, summary.Gold, summary.Platinum),
 		SyncedAt:  time.Now(),
 	}
 
@@ -335,6 +346,8 @@ func mapTrophyError(err error) string {
 			return "该用户奖杯未公开，无法入榜"
 		case trophy.KindNoCredentials:
 			return "服务端未配置 PSN 凭证"
+		case trophy.KindInvalidCredentials:
+			return "PSN 凭证无效，请重新获取 NPSSO"
 		case trophy.KindUpstream:
 			return "暂时无法同步奖杯，请稍后重试"
 		case trophy.KindCooldown:

@@ -4,6 +4,32 @@ import (
 	"testing"
 )
 
+func TestScore(t *testing.T) {
+	tests := []struct {
+		name                     string
+		bronze, silver, gold, pt int
+		want                     int
+	}{
+		{"all zeros", 0, 0, 0, 0, 0},
+		{"only bronze", 10, 0, 0, 0, 150},
+		{"only silver", 0, 10, 0, 0, 300},
+		{"only gold", 0, 0, 10, 0, 900},
+		{"only platinum", 0, 0, 0, 10, 3000},
+		{"mixed", 100, 50, 25, 5, 100*15 + 50*30 + 25*90 + 5*300},
+		{"real example", 1000, 500, 200, 50, 1000*15 + 500*30 + 200*90 + 50*300},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := Score(tt.bronze, tt.silver, tt.gold, tt.pt)
+			if got != tt.want {
+				t.Errorf("Score(%d, %d, %d, %d) = %d, want %d",
+					tt.bronze, tt.silver, tt.gold, tt.pt, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestScoreAndCompetitionRank(t *testing.T) {
 	tests := []struct {
 		name    string

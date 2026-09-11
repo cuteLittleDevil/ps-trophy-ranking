@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"ps-trophy-ranking/internal/rank"
 )
 
 func testdata(t *testing.T, name string) []byte {
@@ -38,7 +40,7 @@ func TestParseCompleteSonyTrophySummaryJSON(t *testing.T) {
 	if body.EarnedTrophies != want {
 		t.Fatalf("earned = %+v", body.EarnedTrophies)
 	}
-	local := Score(want.Bronze, want.Silver, want.Gold, want.Platinum)
+	local := rank.Score(want.Bronze, want.Silver, want.Gold, want.Platinum)
 	if local != body.TrophyPoint {
 		t.Fatalf("local score %d != Sony trophyPoint %d", local, body.TrophyPoint)
 	}
@@ -68,7 +70,7 @@ func TestLookupCapturesCompleteSonyJSON(t *testing.T) {
 	if sum.Platinum != 55 || sum.Gold != 525 || sum.Silver != 1450 || sum.Bronze != 6212 {
 		t.Fatalf("counts = %+v", sum.Counts)
 	}
-	if sum.Score != Score(6212, 1450, 525, 55) {
+	if sum.Score != rank.Score(6212, 1450, 525, 55) {
 		t.Fatalf("score = %d", sum.Score)
 	}
 	if !bytes.Equal(sum.TrophyJSON, trophyRaw) {

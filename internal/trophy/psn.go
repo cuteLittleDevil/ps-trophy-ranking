@@ -3,41 +3,22 @@ package trophy
 import (
 	"context"
 	"ps-trophy-ranking/internal/psn"
-	"strings"
-	"sync"
-	"time"
 )
 
-// PSN wraps the psn.Client with cooldown tracking.
+// PSN wraps the psn.Client without cooldown tracking (cooldown is store-backed).
 type PSN struct {
-	client   *psn.Client
-	cooldown time.Duration
-
-	mu        sync.Mutex
-	lastSync  map[string]time.Time
+	client *psn.Client
 }
 
-// NewPSN creates a PSN trophy source with the given cooldown (15 minutes by spec).
-func NewPSN(client *psn.Client, cooldown time.Duration) *PSN {
+// NewPSN creates a PSN trophy source.
+func NewPSN(client *psn.Client) *PSN {
 	return &PSN{
-		client:   client,
-		cooldown: cooldown,
-		lastSync: make(map[string]time.Time),
+		client: client,
 	}
 }
 
-// Lookup fetches trophy summary from PSN. Enforces cooldown.
+// Lookup fetches trophy summary from PSN.
 func (p *PSN) Lookup(ctx context.Context, onlineID string) (*Summary, error) {
-	key := strings.ToLower(strings.TrimSpace(onlineID))
-
-	p.mu.Lock()
-	last, ok := p.lastSync[key]
-	p.mu.Unlock()
-
-	if ok && time.Since(last) < p.cooldown {
-		return nil, NewError(KindCooldown)
-	}
-
 	summary, err := p.client.Lookup(ctx, onlineID)
 	if err != nil {
 		if psnErr, ok := err.(*psn.Error); ok {
@@ -48,16 +29,14 @@ func (p *PSN) Lookup(ctx context.Context, onlineID string) (*Summary, error) {
 				return nil, NewError(KindPrivate)
 			case psn.KindNoCredentials:
 				return nil, NewError(KindNoCredentials)
-			case psn.KindInvalidCredentials, psn.KindUpstream:
+			case psn.KindInvalidCredentials:
+				return nil, NewError(KindInvalidCredentials)
+			case psn.KindUpstream:
 				return nil, NewError(KindUpstream)
 			}
 		}
 		return nil, NewError(KindUpstream)
 	}
-
-	p.mu.Lock()
-	p.lastSync[key] = time.Now()
-	p.mu.Unlock()
 
 	return &Summary{
 		OnlineID:  summary.OnlineID,
@@ -70,12 +49,4 @@ func (p *PSN) Lookup(ctx context.Context, onlineID string) (*Summary, error) {
 			Platinum: summary.Platinum,
 		},
 	}, nil
-}
-
-// LastSync returns the last sync time for an online ID.
-func (p *PSN) LastSync(onlineID string) time.Time {
-	key := strings.ToLower(strings.TrimSpace(onlineID))
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.lastSync[key]
 }

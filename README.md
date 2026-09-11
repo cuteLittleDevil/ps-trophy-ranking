@@ -181,7 +181,7 @@ web/
 
 ## 依赖
 
-- `modernc.org/sqlite` - 纯 Go SQLite 驱动
+- `modernc.org/sqlite` - 纯 Go SQLite 驱动（无 CGO，跨平台编译友好）
 - `github.com/go-resty/resty/v2` - HTTP 客户端
 
 ## 许可

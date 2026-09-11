@@ -2,6 +2,12 @@ package rank
 
 import "strings"
 
+// Score is Sony's published trophy point formula (bronze 15, silver 30, gold 90, platinum 300).
+// This is the canonical score calculation for ranking.
+func Score(bronze, silver, gold, platinum int) int {
+	return bronze*15 + silver*30 + gold*90 + platinum*300
+}
+
 // Counts is the trophy breakdown for one player.
 type Counts struct {
 	Bronze   int

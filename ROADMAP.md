@@ -6,6 +6,12 @@ v1 排行榜页面已完成。支持演示数据与真实 PSN 档案切换，包
 
 ## 最近完成
 
+- 2026-09-11: SPEC 对齐修复
+  - 冷却改用 store 的 `synced_at`（store-backed cooldown），重启后仍生效
+  - Score 公式统一到 `internal/rank.Score`，删除 `internal/psn/score.go`
+  - Online ID 校验对齐 SPEC（允许数字开头，3–16 位，字母/数字/下划线/连字符）
+  - 区分 `invalid_credentials` 与 `upstream` 错误，中文提示「PSN 凭证无效，请重新获取 NPSSO」
+  - `.env.example` 补全所有配置项和注释
 - 2026-09-11: v1 排行榜全功能实现
   - `internal/rank`: 积分公式、竞赛名次、排序、分页
   - `internal/player`: SQLite 持久化、upsert、查询
