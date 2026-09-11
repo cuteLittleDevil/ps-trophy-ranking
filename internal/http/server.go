@@ -51,6 +51,19 @@ func New(store *player.Store, source trophy.Source, templatesFS, staticFS fs.FS)
 		"lt":         func(a, b int) bool { return a < b },
 		"hasPrefix":  func(s, prefix string) bool { return strings.HasPrefix(s, prefix) },
 		"trimPrefix": func(s, prefix string) string { return strings.TrimPrefix(s, prefix) },
+		"slice": func(s string, start, end int) string {
+			if len(s) == 0 {
+				return "?"
+			}
+			if start >= len(s) {
+				return "?"
+			}
+			if end > len(s) {
+				end = len(s)
+			}
+			return s[start:end]
+		},
+		"toUpper": func(s string) string { return strings.ToUpper(s) },
 	}
 	
 	tmpl, err := template.New("").Funcs(funcMap).ParseFS(templatesFS, "*.html")
