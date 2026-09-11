@@ -218,10 +218,21 @@ func (s *Server) handleJoin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate avatar URL: only accept https or empty
+	// Validate avatar URL: accept https, or http from Sony CDN
 	avatarURL := summary.AvatarURL
-	if avatarURL != "" && !strings.HasPrefix(avatarURL, "https://") {
-		avatarURL = "" // Reject non-https schemes, use placeholder
+	if avatarURL != "" {
+		if strings.HasPrefix(avatarURL, "http://") {
+			// Upgrade Sony CDN URLs from http to https
+			if strings.Contains(avatarURL, "static-resource.np.community.playstation.net") {
+				avatarURL = strings.Replace(avatarURL, "http://", "https://", 1)
+			} else {
+				// Reject other http URLs
+				avatarURL = ""
+			}
+		} else if !strings.HasPrefix(avatarURL, "https://") {
+			// Reject non-http(s) schemes
+			avatarURL = ""
+		}
 	}
 
 	p := player.Player{
