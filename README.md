@@ -230,11 +230,17 @@ go build ./cmd/server
 
 ## 架构
 
-**当前状态：Phase 1（内存排行榜）**
+**当前状态：Phase 2 + 排序优化**
 
-v1 已演进至 §13.8 Phase 1：启动时从 SQLite 加载全量玩家到内存，维护 Top1000 视图与门槛分。所有读取（分页、查找、我的排名）从内存完成；所有写入（入榜、刷新、seed）同步 Upsert SQLite 后更新内存。**稳态读不再每次 `ListAll` + 全量重排**，提升读路径性能。
+v1 已演进至 Phase 2：
+- **Phase 1**（已落地）：启动时从 SQLite 加载全量玩家到内存，维护 Top1000 视图与门槛分。所有读取从内存完成，稳态读不再每次 `ListAll` + 全量重排
+- **Phase 2**（已落地）：WAL 分片写入 + 封段刷盘。模拟数据走 WAL 异步批量更新，真实 PSN 入榜/刷新仍走同步路径
 
-Phase 2（双路径 WAL 分片写入）待实现。
+**排序优化（本 PR）**：
+- **优化 A**：全量排序使用标准库 `slices.SortFunc`，O(N log N) 替代 O(N²) 插入排序
+- **优化 B**：WAL 批量 flush 使用有序合并（ordered merge），避免每次批量更新时对全量数据重排序
+  - 复杂度从 O(M * N log N) 优化为 O(M log M + N)（批量 M，总量 N）
+  - 新增 `indexByID` map 实现 O(1) 查找
 
 ```
 cmd/

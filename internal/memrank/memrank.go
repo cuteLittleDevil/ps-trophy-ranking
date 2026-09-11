@@ -23,6 +23,9 @@ type Leaderboard struct {
 
 	// 门槛分：第 1000 名的 score；不足 1000 人时为 -1
 	thresholdScore int
+
+	// 玩家下标索引，用于快速定位（key 为小写 online_id）
+	indexByID map[string]int
 }
 
 // New 创建空的内存排行榜。
@@ -32,6 +35,7 @@ func New() *Leaderboard {
 		ranked:         []rank.RankedPlayer{},
 		top1000:        []rank.RankedPlayer{},
 		thresholdScore: -1, // -∞ 表示所有写入走热路径
+		indexByID:      make(map[string]int),
 	}
 }
 
@@ -74,44 +78,82 @@ func (lb *Leaderboard) Upsert(p player.Player) {
 	lb.rebuildRankedLocked()
 }
 
-// UpsertBatch 批量更新或插入多个玩家到内存，只 rebuild 一次。
-// 用于 WAL flush 等批量更新场景，避免每个玩家都触发全量排序。
-func (lb *Leaderboard) UpsertBatch(players []player.Player) {
+// UpsertBatch 批量更新或插入玩家到内存，使用有序合并避免全量排序。
+// 适用于 WAL flush 场景，批量大小通常为 10-1000 条。
+// 性能：对于批量 M 和总量 N，复杂度为 O(M log M + N)，优于多次 Upsert 的 O(M * N log N)。
+func (lb *Leaderboard) UpsertBatch(batch []player.Player) {
+	if len(batch) == 0 {
+		return
+	}
+
 	lb.mu.Lock()
 	defer lb.mu.Unlock()
 
-	for i := range players {
-		p := &players[i]
+	// 1. 更新 players map
+	for i := range batch {
+		p := &batch[i]
 		key := strings.ToLower(p.OnlineID)
 		stored := lb.players[key]
 		if stored == nil {
-			// 新玩家：分配新指针
 			stored = &player.Player{}
 			lb.players[key] = stored
 		}
-		// 更新所有字段
 		*stored = *p
 	}
 
-	// 只 rebuild 一次
-	lb.rebuildRankedLocked()
+	// 2. 从 ranked 中移除批次中的玩家（使用 indexByID 快速定位）
+	toRemove := make(map[string]bool, len(batch))
+	for i := range batch {
+		key := strings.ToLower(batch[i].OnlineID)
+		toRemove[key] = true
+	}
+
+	filtered := make([]rank.RankedPlayer, 0, len(lb.ranked))
+	for i := range lb.ranked {
+		key := strings.ToLower(lb.ranked[i].OnlineID)
+		if !toRemove[key] {
+			filtered = append(filtered, lb.ranked[i])
+		}
+	}
+
+	// 3. 将批次转换为 rank.Player 并排序
+	batchPlayers := make([]rank.Player, len(batch))
+	for i := range batch {
+		batchPlayers[i] = rank.Player{
+			OnlineID:  batch[i].OnlineID,
+			DisplayID: batch[i].DisplayID,
+			AvatarURL: batch[i].AvatarURL,
+			Counts: rank.Counts{
+				Bronze:   batch[i].Bronze,
+				Silver:   batch[i].Silver,
+				Gold:     batch[i].Gold,
+				Platinum: batch[i].Platinum,
+			},
+			Score: batch[i].Score,
+		}
+	}
+	batchRanked := rank.SortAndNumber(batchPlayers)
+
+	// 4. 合并 filtered 和 batchRanked（两路归并）
+	lb.ranked = lb.mergeSortedLocked(filtered, batchRanked)
+
+	// 5. 重新分配竞赛名次
+	lb.assignCompetitionRanksLocked()
+
+	// 6. 更新 Top1000、threshold、indexByID
+	lb.updateTop1000AndIndexLocked()
 }
 
 // Get 返回指定 online_id 的玩家及其排名信息。
 // 若不存在返回 nil。
-//
-// Phase 1 实现注意：线性扫描 ranked 切片（O(N)）。
-// 可优化为 map[onlineID]index 加速定位，Phase 1 保持简单实现。
 func (lb *Leaderboard) Get(onlineID string) *rank.RankedPlayer {
 	lb.mu.RLock()
 	defer lb.mu.RUnlock()
 
 	key := strings.ToLower(onlineID)
-	for i := range lb.ranked {
-		if strings.EqualFold(lb.ranked[i].OnlineID, key) {
-			result := lb.ranked[i]
-			return &result
-		}
+	if idx, ok := lb.indexByID[key]; ok {
+		result := lb.ranked[idx]
+		return &result
 	}
 	return nil
 }
@@ -121,16 +163,13 @@ func (lb *Leaderboard) Get(onlineID string) *rank.RankedPlayer {
 // 用于计算分页：page = (index / pageSize) + 1
 //
 // 重要：必须用下标而非竞赛名次 Rank 计算页码，因为同分玩家 Rank 相同但下标不同。
-// Phase 1 实现注意：线性扫描（O(N)），可优化为 map 加速。
 func (lb *Leaderboard) IndexOf(onlineID string) int {
 	lb.mu.RLock()
 	defer lb.mu.RUnlock()
 
 	key := strings.ToLower(onlineID)
-	for i := range lb.ranked {
-		if strings.EqualFold(lb.ranked[i].OnlineID, key) {
-			return i
-		}
+	if idx, ok := lb.indexByID[key]; ok {
+		return idx
 	}
 	return -1
 }
@@ -231,16 +270,119 @@ func (lb *Leaderboard) rebuildRankedLocked() {
 	// 排序并分配竞赛名次
 	lb.ranked = rank.SortAndNumber(players)
 
+	// 更新 Top1000、threshold、indexByID
+	lb.updateTop1000AndIndexLocked()
+}
+
+// mergeSortedLocked 合并两个已排序的 RankedPlayer 列表（忽略原有的 Rank 字段）。
+// 返回按相同排序规则合并后的新列表（Rank 字段需重新分配）。
+// 必须持有写锁时调用。
+func (lb *Leaderboard) mergeSortedLocked(a, b []rank.RankedPlayer) []rank.RankedPlayer {
+	merged := make([]rank.RankedPlayer, 0, len(a)+len(b))
+	i, j := 0, 0
+
+	for i < len(a) && j < len(b) {
+		// 使用 rank 包的比较逻辑（注意：less 返回 true 表示 a < b）
+		// 我们需要判断 a[i] 是否应该排在 b[j] 前面
+		aPlayer := rank.Player{
+			OnlineID:  a[i].OnlineID,
+			DisplayID: a[i].DisplayID,
+			AvatarURL: a[i].AvatarURL,
+			Counts:    a[i].Counts,
+			Score:     a[i].Score,
+		}
+		bPlayer := rank.Player{
+			OnlineID:  b[j].OnlineID,
+			DisplayID: b[j].DisplayID,
+			AvatarURL: b[j].AvatarURL,
+			Counts:    b[j].Counts,
+			Score:     b[j].Score,
+		}
+
+		// comparePlayers 在 rank 包中不导出，我们直接用排序规则比较
+		if shouldComeBefore(aPlayer, bPlayer) {
+			merged = append(merged, a[i])
+			i++
+		} else {
+			merged = append(merged, b[j])
+			j++
+		}
+	}
+
+	// 追加剩余元素
+	for i < len(a) {
+		merged = append(merged, a[i])
+		i++
+	}
+	for j < len(b) {
+		merged = append(merged, b[j])
+		j++
+	}
+
+	return merged
+}
+
+// shouldComeBefore 判断 a 是否应该排在 b 前面（复用 rank 包的排序规则）。
+func shouldComeBefore(a, b rank.Player) bool {
+	// 高分在前
+	if a.Score != b.Score {
+		return a.Score > b.Score
+	}
+	if a.Platinum != b.Platinum {
+		return a.Platinum > b.Platinum
+	}
+	if a.Gold != b.Gold {
+		return a.Gold > b.Gold
+	}
+	if a.Silver != b.Silver {
+		return a.Silver > b.Silver
+	}
+	if a.Bronze != b.Bronze {
+		return a.Bronze > b.Bronze
+	}
+	// ID 字典序升序（小写）
+	return strings.ToLower(a.OnlineID) < strings.ToLower(b.OnlineID)
+}
+
+// assignCompetitionRanksLocked 重新分配竞赛名次（1, 1, 3 规则）。
+// 必须在 ranked 已排序后调用，持有写锁。
+func (lb *Leaderboard) assignCompetitionRanksLocked() {
+	for i := range lb.ranked {
+		rank := i + 1
+		if i > 0 && sameRankCounts(lb.ranked[i-1], lb.ranked[i]) {
+			rank = lb.ranked[i-1].Rank
+		}
+		lb.ranked[i].Rank = rank
+	}
+}
+
+// sameRankCounts 判断两个玩家的成绩是否相同（用于竞赛名次）。
+func sameRankCounts(a, b rank.RankedPlayer) bool {
+	return a.Score == b.Score &&
+		a.Platinum == b.Platinum &&
+		a.Gold == b.Gold &&
+		a.Silver == b.Silver &&
+		a.Bronze == b.Bronze
+}
+
+// updateTop1000AndIndexLocked 更新 Top1000 视图、门槛分和 indexByID。
+// 必须持有写锁时调用。
+func (lb *Leaderboard) updateTop1000AndIndexLocked() {
 	// 更新 Top1000
 	if len(lb.ranked) >= 1000 {
 		lb.top1000 = make([]rank.RankedPlayer, 1000)
 		copy(lb.top1000, lb.ranked[:1000])
-		// 门槛分：第 1000 名的 score
 		lb.thresholdScore = lb.ranked[999].Score
 	} else {
-		// 不足 1000 人，Top1000 = 全量
 		lb.top1000 = make([]rank.RankedPlayer, len(lb.ranked))
 		copy(lb.top1000, lb.ranked)
-		lb.thresholdScore = -1 // 表示门槛为 -∞
+		lb.thresholdScore = -1
+	}
+
+	// 更新 indexByID
+	lb.indexByID = make(map[string]int, len(lb.ranked))
+	for i := range lb.ranked {
+		key := strings.ToLower(lb.ranked[i].OnlineID)
+		lb.indexByID[key] = i
 	}
 }
