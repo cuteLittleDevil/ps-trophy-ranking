@@ -570,6 +570,9 @@ func (s *Server) handleAdminSeed(w http.ResponseWriter, r *http.Request) {
 
 	enqueued := 0
 	failed := 0
+	
+	// Phase 2: 同一请求内内存去重，避免纯随机撞车
+	generated := make(map[string]bool, count)
 
 	for i := 0; i < count; i++ {
 		var onlineID string
@@ -588,9 +591,18 @@ func (s *Server) handleAdminSeed(w http.ResponseWriter, r *http.Request) {
 				break
 			}
 			
-			// Phase 2: WAL 路径不检查已存在（去重在封段时处理）
-			// 快速生成即可，避免每次查库
-			break
+			// 内存去重：检查本次请求内是否已生成
+			if !generated[onlineID] {
+				generated[onlineID] = true
+				break
+			}
+			
+			retries++
+			if retries >= maxSeedRetry {
+				log.Printf("failed to generate unique ID after %d retries", maxSeedRetry)
+				failed++
+				break
+			}
 		}
 
 		if retries >= maxSeedRetry {
@@ -671,4 +683,9 @@ func (s *Server) ReloadFromStore() error {
 	}
 	s.leaderboard.Load(players)
 	return nil
+}
+
+// UpsertMemory 更新单个玩家到内存排行榜（用于 WAL 刷盘）。
+func (s *Server) UpsertMemory(p player.Player) {
+	s.leaderboard.Upsert(p)
 }

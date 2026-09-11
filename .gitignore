@@ -8,3 +8,6 @@ data/
 dist/
 .idea/
 .DS_Store
+/server
+/cmd/server/server
+/cmd/psnlookup/psnlookup

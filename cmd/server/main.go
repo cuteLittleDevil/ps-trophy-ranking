@@ -57,28 +57,40 @@ func main() {
 	// Phase 2: 启动时重放 sealed 段
 	log.Println("Replaying sealed WAL segments...")
 	if err := walMgr.ReplaySealed(func(players []player.Player) error {
-		// 批量刷盘到 SQLite
+		// 批量刷盘到 SQLite 并更新内存
 		for _, p := range players {
 			if err := store.Upsert(p); err != nil {
 				return err
 			}
+			// 从 store 读取完整数据（含 JoinedAt）再更新内存
+			stored, err := store.Get(p.OnlineID)
+			if err == nil && stored != nil {
+				server.UpsertMemory(*stored)
+			} else {
+				server.UpsertMemory(p)
+			}
 		}
-		// 重新加载到内存
-		return server.ReloadFromStore()
+		return nil
 	}); err != nil {
 		log.Fatalf("replay sealed segments: %v", err)
 	}
 
 	// Phase 2: 启动封段 Worker
 	walMgr.StartSealing(cfg.WALSealIntervalMS, func(players []player.Player) error {
-		// 批量刷盘到 SQLite
+		// 批量刷盘到 SQLite 并更新内存
 		for _, p := range players {
 			if err := store.Upsert(p); err != nil {
 				return err
 			}
+			// 从 store 读取完整数据（含 JoinedAt）再更新内存
+			stored, err := store.Get(p.OnlineID)
+			if err == nil && stored != nil {
+				server.UpsertMemory(*stored)
+			} else {
+				server.UpsertMemory(p)
+			}
 		}
-		// 更新内存
-		return server.ReloadFromStore()
+		return nil
 	})
 
 	log.Printf("WAL sealing worker started (interval: %dms)", cfg.WALSealIntervalMS)
