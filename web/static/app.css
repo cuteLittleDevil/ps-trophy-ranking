@@ -297,7 +297,7 @@ footer p {
     margin: 5px 0;
 }
 
-@media (max-width: 1100px) {
+@media (max-width: 1500px) {
     .actions {
         gap: 15px;
     }
