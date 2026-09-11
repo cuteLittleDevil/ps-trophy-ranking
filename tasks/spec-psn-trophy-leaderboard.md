@@ -431,8 +431,7 @@ v1 无登录。看榜、入榜、查找、刷新均公开。不实现 CSRF token
 ### 7.5.2 日志规范
 
 - **统一日志库**：全仓库使用 `log/slog`（Go 1.21+ 标准库结构化日志）
-- **日志级别**：默认 `INFO`；可通过环境变量 `LOG_LEVEL` 配置（`DEBUG`/`INFO`/`WARN`/`ERROR`）
-- **输出格式**：默认 `TextHandler` 输出到 `stderr`；生产环境可切换为 `JSONHandler`
+- **输出格式**：默认 `TextHandler` 输出到 `stderr`
 - **安全要求**：**禁止把 NPSSO、access token、refresh token 等敏感凭证打进日志**
 - **结构化字段**：使用 `slog.String()`、`slog.Int()`、`slog.Duration()` 等附加上下文
 - **关键事件**：
@@ -898,13 +897,6 @@ score > 门槛分？
 - **长耗时操作在锁外**：读 sealed 段、解析 JSON、去重、批量 DB upsert、内存 rebuild 全部在锁外执行
 - **避免锁竞争卡住写入**：seed 1 万条时，若每次封段都持锁做「全量 memrank 重排」，会阻塞新写入数秒；改为批量 Upsert 后单次 rebuild
 - **内存更新隔离**：memrank 可使用独立的 RWMutex，与 WAL 分片锁分离
-   - **仅在 SQLite Upsert 成功后**，整文件删除 `shard-N.log.sealed-<timestamp>`
-   - 同时更新游标/状态文件，记录「该 sealed 段已成功处理」
-
-6. **崩溃恢复**：
-   - 进程重启时，从 SQLite 重建全量内存与 Top1000
-   - 扫描所有 `*.log.sealed-*` 文件（幂等重放）：去重后 Upsert SQLite，再更新内存
-   - **禁止「先删 WAL 再写库」顺序**（会导致崩溃丢数据）；必须先写库、后删 WAL
 
 **可观测性**：
 

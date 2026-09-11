@@ -4,7 +4,6 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
-	_ "net/http/pprof" // 自动注册 /debug/pprof/ 路由
 	"os"
 	"path/filepath"
 
