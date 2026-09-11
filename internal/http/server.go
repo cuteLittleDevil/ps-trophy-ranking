@@ -248,8 +248,16 @@ func (s *Server) handleJoin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Phase 1: 成功后立即更新内存 + Top1000
-	s.leaderboard.Upsert(p)
+	// Phase 1: 从 store 读取完整数据（含 JoinedAt）再更新内存
+	stored, err := s.store.Get(summary.OnlineID)
+	if err != nil {
+		log.Printf("get player after upsert: %v", err)
+		s.leaderboard.Upsert(p)
+	} else if stored != nil {
+		s.leaderboard.Upsert(*stored)
+	} else {
+		s.leaderboard.Upsert(p)
+	}
 
 	http.SetCookie(w, &http.Cookie{
 		Name:     cookieName,
@@ -445,14 +453,15 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) findPlayerPage(onlineID string) int {
-	// Phase 1: 从内存查找玩家并计算页码
-	p := s.leaderboard.Get(onlineID)
-	if p == nil {
+	// Phase 1: 从内存查找玩家在有序列表中的下标（0-based）
+	// 必须用下标而非竞赛名次 Rank，因为同分玩家 Rank 相同但下标不同
+	index := s.leaderboard.IndexOf(onlineID)
+	if index < 0 {
 		return 1
 	}
-	// rank 是 1-based，页码也是 1-based
-	// 第 1-50 名在第 1 页，第 51-100 名在第 2 页
-	return ((p.Rank - 1) / pageSize) + 1
+	// index 是 0-based，页码是 1-based
+	// 下标 0-49 在第 1 页，下标 50-99 在第 2 页
+	return (index / pageSize) + 1
 }
 
 func validateOnlineID(id string) error {

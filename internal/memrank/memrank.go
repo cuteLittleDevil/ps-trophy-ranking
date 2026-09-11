@@ -52,6 +52,10 @@ func (lb *Leaderboard) Load(players []player.Player) {
 
 // Upsert 更新或插入一个玩家到内存，并重新计算排序与 Top1000。
 // 调用方应该在成功写入 SQLite 后立即调用此方法。
+//
+// Phase 1 实现注意：本方法每次调用都会触发全量排序（O(N log N)）。
+// 对于真实 PSN 入榜/刷新（低频，15 分钟冷却），这是可接受的。
+// Phase 2 将引入 WAL 双路径写入，减少热路径冲击。
 func (lb *Leaderboard) Upsert(p player.Player) {
 	lb.mu.Lock()
 	defer lb.mu.Unlock()
@@ -72,6 +76,9 @@ func (lb *Leaderboard) Upsert(p player.Player) {
 
 // Get 返回指定 online_id 的玩家及其排名信息。
 // 若不存在返回 nil。
+//
+// Phase 1 实现注意：线性扫描 ranked 切片（O(N)）。
+// 可优化为 map[onlineID]index 加速定位，Phase 1 保持简单实现。
 func (lb *Leaderboard) Get(onlineID string) *rank.RankedPlayer {
 	lb.mu.RLock()
 	defer lb.mu.RUnlock()
@@ -84,6 +91,25 @@ func (lb *Leaderboard) Get(onlineID string) *rank.RankedPlayer {
 		}
 	}
 	return nil
+}
+
+// IndexOf 返回指定 online_id 在有序列表中的下标（0-based）。
+// 若不存在返回 -1。
+// 用于计算分页：page = (index / pageSize) + 1
+//
+// 重要：必须用下标而非竞赛名次 Rank 计算页码，因为同分玩家 Rank 相同但下标不同。
+// Phase 1 实现注意：线性扫描（O(N)），可优化为 map 加速。
+func (lb *Leaderboard) IndexOf(onlineID string) int {
+	lb.mu.RLock()
+	defer lb.mu.RUnlock()
+
+	key := strings.ToLower(onlineID)
+	for i := range lb.ranked {
+		if strings.EqualFold(lb.ranked[i].OnlineID, key) {
+			return i
+		}
+	}
+	return -1
 }
 
 // Page 返回分页结果。
