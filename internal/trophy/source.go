@@ -20,7 +20,7 @@ type Summary struct {
 	Counts
 }
 
-// Source provides trophy lookups. Implementations: fixture, PSN.
+// Source provides trophy lookups. Production implementation: PSN. Tests inject a fake Source.
 type Source interface {
 	Lookup(ctx context.Context, onlineID string) (*Summary, error)
 }

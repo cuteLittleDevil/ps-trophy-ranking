@@ -185,6 +185,7 @@ go build ./cmd/server
 
 - 产品需求：`tasks/prd-psn-trophy-leaderboard.md`
 - 技术方案：`tasks/spec-psn-trophy-leaderboard.md`
+- 提交历史：`提交历史说明.md`
 - 进度：`ROADMAP.md`
 - 奖杯拉取流程：`docs/flowchart.html`
 
@@ -200,7 +201,7 @@ internal/
   player/         - SQLite 持久化
   psn/            - Sony 非官方 API 客户端
   rank/           - 积分、排序、竞赛名次、分页
-  trophy/         - 数据源接口（fixture / PSN）
+  trophy/         - 数据源接口（PSN；测试注入 fake Source）
 web/
   templates/      - HTML 模板
   static/         - CSS 和占位图
