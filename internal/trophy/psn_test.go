@@ -17,8 +17,8 @@ func TestPSNErrorMapping(t *testing.T) {
 		t.Fatal("expected error with empty NPSSO")
 	}
 
-	var tErr *Error
-	if !isError(err, &tErr) || tErr.Kind != KindNoCredentials {
+	tErr, ok := err.(*Error)
+	if !ok || tErr.Kind != KindNoCredentials {
 		t.Errorf("expected KindNoCredentials, got %v", err)
 	}
 }

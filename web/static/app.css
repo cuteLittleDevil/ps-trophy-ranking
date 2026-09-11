@@ -201,6 +201,20 @@ tbody tr.is-you:hover {
     background: #2d3748;
 }
 
+.avatar-letter {
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    background: #2d3748;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    font-size: 1.2rem;
+    color: #00a8e8;
+    margin: 0 auto;
+}
+
 .id-col {
     font-weight: 600;
     color: #e0e6ed;

@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"ps-trophy-ranking/internal/player"
 	"ps-trophy-ranking/internal/trophy"
@@ -264,7 +263,7 @@ func TestJoinRejectsNegativeCounts(t *testing.T) {
 
 	templatesFS := os.DirFS("../../web/templates")
 	staticFS := os.DirFS("../../web/static")
-	server, _ := New(store, negSource, "test", templatesFS, staticFS)
+	server, _ := New(store, negSource, templatesFS, staticFS)
 
 	form := url.Values{}
 	form.Set("online_id", "baduser")
@@ -328,7 +327,7 @@ func TestJoinValidatesAvatarURL(t *testing.T) {
 
 			templatesFS := os.DirFS("../../web/templates")
 			staticFS := os.DirFS("../../web/static")
-			srv, _ := New(tmpStore, testSrc, "test", templatesFS, staticFS)
+			srv, _ := New(tmpStore, testSrc, templatesFS, staticFS)
 
 			form := url.Values{}
 			form.Set("online_id", "testuser")
@@ -399,12 +398,27 @@ func setupTestServer(t *testing.T) (*Server, *player.Store) {
 		t.Fatalf("open store: %v", err)
 	}
 
-	source := trophy.NewFixture()
+	// Create test source with fixture-like data
+	source := &testSource{
+		lookups: map[string]*trophy.Summary{
+			"fixture_alpha": {
+				OnlineID:  "fixture_alpha",
+				DisplayID: "Fixture_Alpha",
+				AvatarURL: "",
+				Counts: trophy.Counts{
+					Bronze:   1000,
+					Silver:   500,
+					Gold:     200,
+					Platinum: 50,
+				},
+			},
+		},
+	}
 
 	templatesFS := os.DirFS("../../web/templates")
 	staticFS := os.DirFS("../../web/static")
 
-	server, err := New(store, source, "test", templatesFS, staticFS)
+	server, err := New(store, source, templatesFS, staticFS)
 	if err != nil {
 		t.Fatalf("create server: %v", err)
 	}
@@ -426,8 +440,4 @@ func (ts *testSource) Lookup(ctx context.Context, onlineID string) (*trophy.Summ
 		return nil, trophy.NewError(trophy.KindNotFound)
 	}
 	return s, nil
-}
-
-func (ts *testSource) LastSync(onlineID string) time.Time {
-	return time.Time{}
 }

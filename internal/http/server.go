@@ -2,10 +2,12 @@ package http
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"html/template"
 	"io/fs"
 	"log"
+	"math/rand"
 	"net/http"
 	"net/url"
 	"ps-trophy-ranking/internal/player"
@@ -32,21 +34,22 @@ var idPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
 // Server is the HTTP server with dependencies.
 type Server struct {
-	store      *player.Store
-	source     trophy.Source
-	dataSource string
-	tmpl       *template.Template
+	store       *player.Store
+	source      trophy.Source
+	tmpl        *template.Template
 	templatesFS fs.FS
 	staticFS    fs.FS
 }
 
 // New creates a new HTTP server.
-func New(store *player.Store, source trophy.Source, dataSource string, templatesFS, staticFS fs.FS) (*Server, error) {
+func New(store *player.Store, source trophy.Source, templatesFS, staticFS fs.FS) (*Server, error) {
 	funcMap := template.FuncMap{
-		"add": func(a, b int) int { return a + b },
-		"sub": func(a, b int) int { return a - b },
-		"gt":  func(a, b int) bool { return a > b },
-		"lt":  func(a, b int) bool { return a < b },
+		"add":        func(a, b int) int { return a + b },
+		"sub":        func(a, b int) int { return a - b },
+		"gt":         func(a, b int) bool { return a > b },
+		"lt":         func(a, b int) bool { return a < b },
+		"hasPrefix":  func(s, prefix string) bool { return strings.HasPrefix(s, prefix) },
+		"trimPrefix": func(s, prefix string) string { return strings.TrimPrefix(s, prefix) },
 	}
 	
 	tmpl, err := template.New("").Funcs(funcMap).ParseFS(templatesFS, "*.html")
@@ -57,7 +60,6 @@ func New(store *player.Store, source trophy.Source, dataSource string, templates
 	return &Server{
 		store:       store,
 		source:      source,
-		dataSource:  dataSource,
 		tmpl:        tmpl,
 		templatesFS: templatesFS,
 		staticFS:    staticFS,
@@ -76,6 +78,7 @@ func (s *Server) Handler() http.Handler {
 	r.Post("/join", s.handleJoin)
 	r.Get("/search", s.handleSearch)
 	r.Get("/me", s.handleMe)
+	r.Post("/admin/seed", s.handleAdminSeed)
 	r.Handle("/static/*", http.StripPrefix("/static/", http.FileServer(http.FS(s.staticFS))))
 	
 	return r
@@ -89,7 +92,6 @@ type pageData struct {
 	InfoMessage  string
 	EmptyMessage string
 	InputID      string
-	DataSource   string
 }
 
 type rankedPlayerView struct {
@@ -115,7 +117,6 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
 	if len(players) == 0 {
 		s.render(w, pageData{
 			EmptyMessage: "还没有玩家入榜",
-			DataSource:   s.dataSource,
 		})
 		return
 	}
@@ -144,7 +145,6 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
 			EmptyMessage: "没有更多玩家",
 			CurrentPage:  page,
 			TotalPages:   totalPages,
-			DataSource:   s.dataSource,
 		})
 		return
 	}
@@ -162,7 +162,6 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
 		Players:     views,
 		CurrentPage: page,
 		TotalPages:  totalPages,
-		DataSource:  s.dataSource,
 	})
 }
 
@@ -179,16 +178,14 @@ func (s *Server) handleJoin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check store-based cooldown for real PSN mode (fixture has no cooldown)
-	if s.dataSource != "演示数据" {
-		existing, err := s.store.Get(onlineID)
-		if err != nil {
-			log.Printf("check cooldown: %v", err)
-		}
-		if existing != nil && time.Since(existing.SyncedAt) < 15*time.Minute {
-			s.renderError(w, "同步过于频繁", onlineID)
-			return
-		}
+	// Check store-based cooldown for PSN syncs
+	existing, err := s.store.Get(onlineID)
+	if err != nil {
+		log.Printf("check cooldown: %v", err)
+	}
+	if existing != nil && time.Since(existing.SyncedAt) < 15*time.Minute {
+		s.renderError(w, "同步过于频繁", onlineID)
+		return
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
@@ -379,9 +376,6 @@ func mapTrophyError(err error) string {
 }
 
 func (s *Server) render(w http.ResponseWriter, data pageData) {
-	if data.DataSource == "" {
-		data.DataSource = s.dataSource
-	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := s.tmpl.ExecuteTemplate(w, "leaderboard.html", data); err != nil {
 		log.Printf("render template: %v", err)
@@ -427,6 +421,93 @@ func (s *Server) renderError(w http.ResponseWriter, errMsg, inputID string) {
 		TotalPages:  totalPages,
 		Error:       errMsg,
 		InputID:     inputID,
-		DataSource:  s.dataSource,
+	})
+}
+
+// handleAdminSeed seeds the database with simulated users.
+// No authentication - relies on localhost binding.
+func (s *Server) handleAdminSeed(w http.ResponseWriter, r *http.Request) {
+	countStr := r.FormValue("count")
+	if countStr == "" {
+		countStr = r.URL.Query().Get("count")
+	}
+
+	count, err := strconv.Atoi(countStr)
+	if err != nil || count <= 0 {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"ok":    false,
+			"error": "invalid count parameter, must be positive integer",
+		})
+		return
+	}
+
+	inserted := 0
+	maxRetries := 10
+
+	for i := 0; i < count; i++ {
+		var onlineID string
+		retries := 0
+		
+		// Generate unique online_id with retries
+		for {
+			randomNum := rand.Intn(1000000)
+			onlineID = fmt.Sprintf("simulation%d", randomNum)
+			
+			// Check if already exists
+			existing, err := s.store.Get(onlineID)
+			if err != nil {
+				log.Printf("check existing user: %v", err)
+			}
+			
+			if existing == nil {
+				break // unique ID found
+			}
+			
+			retries++
+			if retries >= maxRetries {
+				log.Printf("failed to generate unique ID after %d retries", maxRetries)
+				break
+			}
+		}
+
+		if retries >= maxRetries {
+			continue // skip this user
+		}
+
+		// Generate random trophy counts with reasonable limits
+		bronze := rand.Intn(5001)    // 0-5000
+		silver := rand.Intn(2001)    // 0-2000
+		gold := rand.Intn(801)       // 0-800
+		platinum := rand.Intn(201)   // 0-200
+
+		// Random avatar letter A-Z
+		avatarLetter := string(rune('A' + rand.Intn(26)))
+
+		p := player.Player{
+			OnlineID:  onlineID,
+			DisplayID: onlineID,
+			AvatarURL: "letter:" + avatarLetter,
+			Bronze:    bronze,
+			Silver:    silver,
+			Gold:      gold,
+			Platinum:  platinum,
+			Score:     rank.Score(bronze, silver, gold, platinum),
+			SyncedAt:  time.Now(),
+		}
+
+		if err := s.store.Upsert(p); err != nil {
+			log.Printf("seed upsert: %v", err)
+			continue
+		}
+
+		inserted++
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"ok":       true,
+		"inserted": inserted,
 	})
 }
