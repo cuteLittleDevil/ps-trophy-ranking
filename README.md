@@ -233,10 +233,11 @@ go build ./cmd/server
 
 **当前状态：Phase 2 + 排序优化（已落地）**
 
-v1 已演进至高吞吐写入架构 Phase 2（PR #11–#16，2026-09-11）：
+v1 已演进至高吞吐写入架构 Phase 2+（PR #11–#16，2026-09-11）：
 - **Phase 1**：全量内存排行榜 + Top1000 视图 + 门槛分；稳态读不访问 SQLite
 - **Phase 2**：双路径写入（热路径同步 SQLite，冷路径 WAL 异步刷盘）+ 10 分片 + 封段协议
 - **排序优化**：标准库排序 O(N log N) + 有序合并 O(M log M + N) + O(1) 查找
+- **Phase 2+ 批事务刷盘优化（本 PR）**：WAL flush 路径改用批事务 + multi-VALUES（固定批次 N=100，可配置），降低 I/O 与事务开销
 
 **详细架构文档**：[docs/architecture.md](docs/architecture.md)，包含：
 - 系统总览图（HTTP / memrank / WAL / SQLite / PSN）
