@@ -534,6 +534,7 @@ const (
 	maxSeedRetry = 10
 	seedIDPrefix = "sim"
 	seedIDMaxNum = 10000000 // 7 digits: sim + 7 digits = 10 chars, well under 16
+	maxSeedCount = 1000000  // 硬顶 100 万
 )
 
 // handleAdminSeed seeds the database with simulated users via WAL (Phase 2).
@@ -564,6 +565,16 @@ func (s *Server) handleAdminSeed(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"ok":    false,
 			"error": "invalid count parameter, must be positive integer",
+		})
+		return
+	}
+
+	if count > maxSeedCount {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"ok":    false,
+			"error": fmt.Sprintf("count exceeds maximum limit of %d", maxSeedCount),
 		})
 		return
 	}

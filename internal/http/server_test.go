@@ -542,12 +542,12 @@ func TestAdminSeedInvalidCount(t *testing.T) {
 }
 
 func TestAdminSeedExceedsMax(t *testing.T) {
-	// Phase 2: 移除了 count 上限，此测试改为测试大批量灌数
 	server, store := setupTestServer(t)
 	defer store.Close()
 
+	// Test exceeding the 1,000,000 hard limit
 	form := url.Values{}
-	form.Set("count", "100") // Phase 2 无上限，测试 100 个
+	form.Set("count", "1000001") // 超过硬顶
 
 	req := httptest.NewRequest("POST", "/admin/seed", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -555,20 +555,44 @@ func TestAdminSeedExceedsMax(t *testing.T) {
 	w := httptest.NewRecorder()
 	server.Handler().ServeHTTP(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Errorf("status = %d, want %d", w.Code, http.StatusOK)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusBadRequest)
 	}
 
 	var resp map[string]interface{}
 	json.NewDecoder(w.Body).Decode(&resp)
 
-	if !resp["ok"].(bool) {
-		t.Error("expected ok=true for large count")
+	if resp["ok"] != false {
+		t.Error("expected ok=false for count exceeding limit")
+	}
+	
+	// 验证错误消息包含限制值
+	if errMsg, ok := resp["error"].(string); ok {
+		if !strings.Contains(errMsg, "1000000") {
+			t.Errorf("error message should mention limit: %s", errMsg)
+		}
+	} else {
+		t.Error("expected error message")
 	}
 
-	enqueued := int(resp["enqueued"].(float64))
-	if enqueued != 100 {
-		t.Errorf("enqueued = %d, want 100", enqueued)
+	// Test exactly at the limit (should succeed)
+	form2 := url.Values{}
+	form2.Set("count", "1000000")
+
+	req2 := httptest.NewRequest("POST", "/admin/seed", strings.NewReader(form2.Encode()))
+	req2.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req2.RemoteAddr = "127.0.0.1:12345"
+	w2 := httptest.NewRecorder()
+	server.Handler().ServeHTTP(w2, req2)
+
+	if w2.Code != http.StatusOK {
+		t.Errorf("status for exactly limit = %d, want %d", w2.Code, http.StatusOK)
+	}
+
+	var resp2 map[string]interface{}
+	json.NewDecoder(w2.Body).Decode(&resp2)
+	if !resp2["ok"].(bool) {
+		t.Error("expected ok=true for count exactly at limit")
 	}
 }
 
