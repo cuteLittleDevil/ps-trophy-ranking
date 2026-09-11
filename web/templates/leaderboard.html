@@ -85,6 +85,7 @@
                             {{if not (hasPrefix .OnlineID "sim")}}
                             <form method="POST" action="/refresh" style="display:inline;">
                                 <input type="hidden" name="online_id" value="{{.OnlineID}}">
+                                <input type="hidden" name="page" value="{{$.CurrentPage}}">
                                 <button type="submit" class="refresh-btn">刷新</button>
                             </form>
                             {{end}}

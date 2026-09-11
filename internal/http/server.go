@@ -362,14 +362,14 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		MaxAge:   cookieMaxAge,
 	})
 
-	// Get current page from query parameter
-	currentPage := r.URL.Query().Get("page")
-	if currentPage == "" {
-		currentPage = "1"
+	// Get current page from form data
+	page, _ := strconv.Atoi(r.FormValue("page"))
+	if page < 1 {
+		page = 1
 	}
 
 	// Redirect back to the same page with highlight
-	redirectURL := fmt.Sprintf("/?page=%s&highlight=%s", currentPage, url.QueryEscape(summary.OnlineID))
+	redirectURL := fmt.Sprintf("/?page=%d&highlight=%s", page, url.QueryEscape(summary.OnlineID))
 	http.Redirect(w, r, redirectURL, http.StatusSeeOther)
 }
 

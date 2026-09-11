@@ -872,3 +872,75 @@ func TestRefreshPreservesJoinedAt(t *testing.T) {
 		t.Errorf("bronze = %d, want 200", updated.Bronze)
 	}
 }
+
+func TestRefreshWithPage(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+	store, err := player.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	// Setup: Insert a player first
+	now := time.Now()
+	p := player.Player{
+		OnlineID:  "pageuser",
+		DisplayID: "PageUser",
+		Bronze:    100,
+		Silver:    50,
+		Gold:      20,
+		Platinum:  5,
+		Score:     4000,
+	}
+	if err := store.Upsert(p); err != nil {
+		t.Fatalf("setup upsert: %v", err)
+	}
+
+	// Update synced_at to be past cooldown
+	if err := store.UpdateSyncedAt("pageuser", now.Add(-20*time.Minute)); err != nil {
+		t.Fatalf("update synced_at: %v", err)
+	}
+
+	// Create test source with updated trophy counts
+	testSrc := &testSource{
+		lookups: map[string]*trophy.Summary{
+			"pageuser": {
+				OnlineID:  "pageuser",
+				DisplayID: "PageUser",
+				AvatarURL: "",
+				Counts: trophy.Counts{
+					Bronze:   150,
+					Silver:   60,
+					Gold:     25,
+					Platinum: 6,
+				},
+			},
+		},
+	}
+
+	templatesFS := os.DirFS("../../web/templates")
+	staticFS := os.DirFS("../../web/static")
+	server, _ := New(store, testSrc, templatesFS, staticFS)
+
+	form := url.Values{}
+	form.Set("online_id", "pageuser")
+	form.Set("page", "2")
+
+	req := httptest.NewRequest("POST", "/refresh", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	server.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusSeeOther {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusSeeOther)
+	}
+
+	location := w.Header().Get("Location")
+	if !strings.Contains(location, "page=2") {
+		t.Errorf("location = %q, want page=2", location)
+	}
+	if !strings.Contains(location, "highlight=pageuser") {
+		t.Errorf("location = %q, want highlight", location)
+	}
+}
