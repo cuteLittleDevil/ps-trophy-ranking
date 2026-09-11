@@ -2,6 +2,57 @@
 
 PSN 奖杯用户排行榜。v1 排行榜页面已完成，从真实 PSN 档案拉取奖杯数据。
 
+## 系统架构
+
+**当前版本：Phase 2+ 高吞吐演进架构已落地**
+
+本系统是一个**单机 Go 服务**，使用 **SQLite** 持久化 + **全量内存排行榜** + **WAL 分片异步写入**，支撑 ~10,000 更新/秒（压测/灌数场景）。
+
+### 已落地版本
+
+| 阶段 | 状态 | PR | 核心内容 |
+|------|------|-----|----------|
+| **Phase 1** | ✅ 已落地 | #12 | 全量内存排行榜 + Top1000 视图；稳态读不访问 SQLite |
+| **Phase 1+ 排序优化** | ✅ 已落地 | #15, #16 | 标准库排序 O(N log N) + 有序合并 O(M log M + N) + O(1) 查找 |
+| **Phase 2** | ✅ 已落地 | #13 | WAL 10 分片 + 封段刷盘（100ms 周期）；冷路径异步写入 |
+| **Phase 2+ 批事务优化** | ✅ 已落地 | #18 | **方案 B**：批次 N=100 + multi-VALUES + SQL 保留 joined_at；热路径仍单条 |
+
+### 核心特性
+
+- **双路径写入**：
+  - **热路径**（`/join` `/refresh`）：实时写入 SQLite + 内存，立即可见（适合真实 PSN，受 15 分钟冷却保护）
+  - **冷路径**（`/admin/seed`）：追加 WAL 分片，100ms 封段批量刷盘（适合大批量灌数）
+- **内存排行榜**：启动时加载全量玩家，维护 Top1000 视图与门槛分；所有读取从内存完成，< 10ms 延迟
+- **批事务刷盘（方案 B，PR #18）**：每 100 条一个事务 + multi-VALUES，1000 条 flush 从 ~1000 次 fsync 降至 ~10 次
+- **排序优化**：标准库 O(N log N) + 有序合并，10 万玩家排序 ~50ms，1000 条批量更新 ~100ms
+- **WAL 锁优化**：持锁仅 rename + 创建新文件（毫秒级），读取/解析/DB upsert/内存 rebuild 在锁外
+
+### 架构图
+
+```
+浏览器 (HTML 表单)
+  ↓
+HTTP Server (chi) ← pprof (/debug/pprof/)
+  ├─ GET /          → MemRank (Top1000 视图 / 全量内存)
+  ├─ POST /join     → 热路径 → SQLite Upsert → MemRank.Upsert
+  ├─ POST /refresh  → 热路径 → SQLite Upsert → MemRank.Upsert
+  └─ POST /admin/seed → 冷路径 → WAL Shards (10 个分片)
+                                    ↓
+                          Sealing Worker (100ms 周期)
+                            ├─ Rename → Sealed
+                            ├─ 读取 + 去重
+                            ├─ UpsertBatch (方案 B: N=100, multi-VALUES)
+                            └─ MemRank.UpsertBatch (有序合并)
+                                    ↓
+                              SQLite (leaderboard.db)
+                                    ↓
+                          Trophy Source (PSN Client)
+```
+
+**详细架构文档**：[`docs/architecture.md`](docs/architecture.md)（组件职责、数据流、性能优化、可观测性）
+
+---
+
 ## 启动排行榜服务
 
 在项目根目录：
