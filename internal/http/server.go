@@ -15,6 +15,7 @@ import (
 	"ps-trophy-ranking/internal/player"
 	"ps-trophy-ranking/internal/rank"
 	"ps-trophy-ranking/internal/trophy"
+	"ps-trophy-ranking/internal/wal"
 	"regexp"
 	"strconv"
 	"strings"
@@ -39,13 +40,14 @@ type Server struct {
 	store       *player.Store
 	source      trophy.Source
 	leaderboard *memrank.Leaderboard
+	walMgr      *wal.Manager
 	tmpl        *template.Template
 	templatesFS fs.FS
 	staticFS    fs.FS
 }
 
 // New creates a new HTTP server and loads the initial leaderboard from store.
-func New(store *player.Store, source trophy.Source, templatesFS, staticFS fs.FS) (*Server, error) {
+func New(store *player.Store, source trophy.Source, walMgr *wal.Manager, templatesFS, staticFS fs.FS) (*Server, error) {
 	funcMap := template.FuncMap{
 		"add":        func(a, b int) int { return a + b },
 		"sub":        func(a, b int) int { return a - b },
@@ -88,6 +90,7 @@ func New(store *player.Store, source trophy.Source, templatesFS, staticFS fs.FS)
 		store:       store,
 		source:      source,
 		leaderboard: leaderboard,
+		walMgr:      walMgr,
 		tmpl:        tmpl,
 		templatesFS: templatesFS,
 		staticFS:    staticFS,
@@ -528,14 +531,14 @@ func (s *Server) renderError(w http.ResponseWriter, errMsg, inputID string) {
 }
 
 const (
-	maxSeedCount  = 1000
-	maxSeedRetry  = 10
-	seedIDPrefix  = "sim"
-	seedIDMaxNum  = 10000000 // 7 digits: sim + 7 digits = 10 chars, well under 16
+	maxSeedRetry = 10
+	seedIDPrefix = "sim"
+	seedIDMaxNum = 10000000 // 7 digits: sim + 7 digits = 10 chars, well under 16
 )
 
-// handleAdminSeed seeds the database with simulated users.
+// handleAdminSeed seeds the database with simulated users via WAL (Phase 2).
 // Only accepts requests from loopback addresses (127.0.0.1, ::1).
+// 追加到 WAL 后立即返回，实际写入 SQLite 延迟约 100ms-1s。
 func (s *Server) handleAdminSeed(w http.ResponseWriter, r *http.Request) {
 	// Check remote address is loopback
 	remoteAddr := r.RemoteAddr
@@ -565,18 +568,11 @@ func (s *Server) handleAdminSeed(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if count > maxSeedCount {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"ok":    false,
-			"error": fmt.Sprintf("count exceeds maximum allowed (%d)", maxSeedCount),
-		})
-		return
-	}
-
-	inserted := 0
+	enqueued := 0
 	failed := 0
+	
+	// Phase 2: 同一请求内内存去重，避免纯随机撞车
+	generated := make(map[string]bool, count)
 
 	for i := 0; i < count; i++ {
 		var onlineID string
@@ -595,14 +591,10 @@ func (s *Server) handleAdminSeed(w http.ResponseWriter, r *http.Request) {
 				break
 			}
 			
-			// Check if already exists
-			existing, err := s.store.Get(onlineID)
-			if err != nil {
-				log.Printf("check existing user: %v", err)
-			}
-			
-			if existing == nil {
-				break // unique ID found
+			// 内存去重：检查本次请求内是否已生成
+			if !generated[onlineID] {
+				generated[onlineID] = true
+				break
 			}
 			
 			retries++
@@ -638,42 +630,21 @@ func (s *Server) handleAdminSeed(w http.ResponseWriter, r *http.Request) {
 			SyncedAt:  time.Now(),
 		}
 
-		// Phase 1: 同步 Upsert SQLite
-		if err := s.store.Upsert(p); err != nil {
-			log.Printf("seed upsert: %v", err)
+		// Phase 2: 追加到 WAL，立即返回
+		if err := s.walMgr.Append(p); err != nil {
+			log.Printf("seed wal append: %v", err)
 			failed++
 			continue
 		}
 
-		// Phase 1: 从 store 读取完整数据（含 JoinedAt）再更新内存
-		stored, err := s.store.Get(onlineID)
-		if err != nil {
-			log.Printf("get player after seed upsert: %v", err)
-			s.leaderboard.Upsert(p)
-		} else if stored != nil {
-			s.leaderboard.Upsert(*stored)
-		} else {
-			s.leaderboard.Upsert(p)
-		}
-
-		inserted++
+		enqueued++
 	}
 
-	// If we couldn't insert any users when requested, return error
-	if inserted == 0 && count > 0 {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"ok":    false,
-			"error": "failed to insert any users",
-		})
-		return
-	}
-
+	// 返回 enqueued 状态（未等待刷盘）
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"ok":       true,
-		"inserted": inserted,
+		"enqueued": enqueued,
 		"failed":   failed,
 	})
 }
@@ -712,4 +683,9 @@ func (s *Server) ReloadFromStore() error {
 	}
 	s.leaderboard.Load(players)
 	return nil
+}
+
+// UpsertMemory 更新单个玩家到内存排行榜（用于 WAL 刷盘）。
+func (s *Server) UpsertMemory(p player.Player) {
+	s.leaderboard.Upsert(p)
 }

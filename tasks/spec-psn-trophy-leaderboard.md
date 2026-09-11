@@ -487,17 +487,24 @@ v1 本地演示：个位数并发、最多数百行。**万级并发写入与秒
 - ✅ 分页逻辑：名次 ≤1000 走 Top1000 视图；之外走全量有序结构
 - ✅ 测试覆盖：内存加载、upsert 后可读、Top1000 切片、search/me 从内存查找
 
-**Phase 1 行为**：
+**Phase 1 行为（2026-09-11 PR #12）**：
 
 - 读路径性能提升（无需每次全量 SQL 查询与排序）
 - 写路径仍为 v1 行为（同步 SQLite，适合真实 PSN 低频入榜）
-- 无 WAL 文件；Phase 2 才引入双路径写入与封段刷盘
+- 无 WAL 文件
 
-**未实现（Phase 2+）**：
+**Phase 2 行为（2026-09-11 当前 PR）**：
 
-- WAL 分片、封段、冷热分流写入（§13.3.2）
+- `/admin/seed` 走 WAL 冷路径：追加到 10 分片，封段刷盘
+- `/join` `/refresh` 仍走热路径（同步 SQLite + 内存）
+- 启动时自动重放 sealed 段
+- WAL 目录默认 `./data/wal/`，已 gitignore
+
+**未实现（Phase 3+）**：
+
 - Prometheus metrics、反压（§13.7）
 - 热路径 micro-batch（§13.8 Phase 4）
+- 双路径门槛判断（当前 `/join` `/refresh` 始终热路径）
 
 ### 10.2 v1 基线回顾
 
@@ -990,11 +997,13 @@ score > 门槛分？
    - **验收**：读性能提升；写入仍为 v1 水平
    - **实现模块**：`internal/memrank` 封装内存排行榜；HTTP 层集成
 
-2. **Phase 2**：冷路径 WAL + 封段刷盘（待实现）
-   - 增加双路径判断（门槛分）
-   - 冷路径追加 WAL 分片；封段 Worker
-   - 热路径仍同步 Upsert
-   - **验收**：`/admin/seed` 高并发灌数达 1w/s；可见延迟 ≤1s
+2. **Phase 2**：冷路径 WAL + 封段刷盘 ✅ **已落地（2026-09-11）**
+   - 去除 `/admin/seed` count 上限（仍须正整数）
+   - 模拟数据追加到 10 个 hash 分片文件（`data/wal/shard-N.log`）
+   - 封段 Worker：每 100ms rename 为 sealed，读取去重，批量 Upsert SQLite + 内存，删除 sealed
+   - 启动时重放未处理 sealed 段
+   - `/join` `/refresh` 仍同步写库（热路径），seed 走 WAL（冷路径）
+   - **验收**：`/admin/seed` 支持大批量灌数（如 10000+）；入队即返回 JSON（enqueued/failed）；可见延迟约 100ms-1s
 
 3. **Phase 3**：崩溃恢复 + 可观测（待实现）
    - 启动重放 sealed 段

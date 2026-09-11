@@ -14,6 +14,7 @@ import (
 
 	"ps-trophy-ranking/internal/player"
 	"ps-trophy-ranking/internal/trophy"
+	"ps-trophy-ranking/internal/wal"
 )
 
 func TestHomeEmpty(t *testing.T) {
@@ -254,6 +255,8 @@ func TestJoinRejectsNegativeCounts(t *testing.T) {
 	_, store := setupTestServer(t)
 	defer store.Close()
 
+	tmpDir := t.TempDir()
+
 	// Create a test source that returns negative counts
 	negSource := &testSource{
 		lookups: map[string]*trophy.Summary{
@@ -273,7 +276,9 @@ func TestJoinRejectsNegativeCounts(t *testing.T) {
 
 	templatesFS := os.DirFS("../../web/templates")
 	staticFS := os.DirFS("../../web/static")
-	server, _ := New(store, negSource, templatesFS, staticFS)
+	walMgr, _ := wal.New(tmpDir, 10)
+	t.Cleanup(func() { walMgr.Close() })
+	server, _ := New(store, negSource, walMgr, templatesFS, staticFS)
 
 	form := url.Values{}
 	form.Set("online_id", "baduser")
@@ -337,7 +342,9 @@ func TestJoinValidatesAvatarURL(t *testing.T) {
 
 			templatesFS := os.DirFS("../../web/templates")
 			staticFS := os.DirFS("../../web/static")
-			srv, _ := New(tmpStore, testSrc, templatesFS, staticFS)
+			walMgr, _ := wal.New(tmpDir, 10)
+			defer walMgr.Close()
+			srv, _ := New(tmpStore, testSrc, walMgr, templatesFS, staticFS)
 
 			form := url.Values{}
 			form.Set("online_id", "testuser")
@@ -432,8 +439,11 @@ func setupTestServer(t *testing.T) (*Server, *player.Store) {
 
 	templatesFS := os.DirFS("../../web/templates")
 	staticFS := os.DirFS("../../web/static")
+	walDir := filepath.Join(tmpDir, "wal")
+	walMgr, _ := wal.New(walDir, 10)
+	t.Cleanup(func() { walMgr.Close() })
 
-	server, err := New(store, source, templatesFS, staticFS)
+	server, err := New(store, source, walMgr, templatesFS, staticFS)
 	if err != nil {
 		t.Fatalf("create server: %v", err)
 	}
@@ -483,23 +493,14 @@ func TestAdminSeedSuccess(t *testing.T) {
 		t.Error("expected ok=true")
 	}
 
-	inserted := int(resp["inserted"].(float64))
-	if inserted != 5 {
-		t.Errorf("inserted = %d, want 5", inserted)
+	// Phase 2: 返回 enqueued 而非 inserted
+	enqueued := int(resp["enqueued"].(float64))
+	if enqueued != 5 {
+		t.Errorf("enqueued = %d, want 5", enqueued)
 	}
-
-	// Check IDs are in correct format and length
-	players, _ := store.ListAll()
-	for _, p := range players {
-		if !strings.HasPrefix(p.OnlineID, "sim") {
-			t.Errorf("online_id = %s, want prefix 'sim'", p.OnlineID)
-		}
-		if len(p.OnlineID) < 3 || len(p.OnlineID) > 16 {
-			t.Errorf("online_id length = %d, must be 3-16", len(p.OnlineID))
-		}
-	}
+        // Phase 2: WAL 写入是异步的，不立即验证数据库内容
+        // 封段刷盘后数据才会出现在 SQLite，测试只验证入队成功
 }
-
 func TestAdminSeedInvalidCount(t *testing.T) {
 	server, store := setupTestServer(t)
 	defer store.Close()
@@ -541,11 +542,12 @@ func TestAdminSeedInvalidCount(t *testing.T) {
 }
 
 func TestAdminSeedExceedsMax(t *testing.T) {
+	// Phase 2: 移除了 count 上限，此测试改为测试大批量灌数
 	server, store := setupTestServer(t)
 	defer store.Close()
 
 	form := url.Values{}
-	form.Set("count", "1001") // Exceeds maxSeedCount (1000)
+	form.Set("count", "100") // Phase 2 无上限，测试 100 个
 
 	req := httptest.NewRequest("POST", "/admin/seed", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -553,21 +555,25 @@ func TestAdminSeedExceedsMax(t *testing.T) {
 	w := httptest.NewRecorder()
 	server.Handler().ServeHTTP(w, req)
 
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("status = %d, want %d", w.Code, http.StatusBadRequest)
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusOK)
 	}
 
 	var resp map[string]interface{}
 	json.NewDecoder(w.Body).Decode(&resp)
-	if resp["ok"] != false {
-		t.Error("expected ok=false")
+
+	if !resp["ok"].(bool) {
+		t.Error("expected ok=true for large count")
 	}
-	if !strings.Contains(resp["error"].(string), "maximum") {
-		t.Errorf("error message should mention maximum, got: %s", resp["error"])
+
+	enqueued := int(resp["enqueued"].(float64))
+	if enqueued != 100 {
+		t.Errorf("enqueued = %d, want 100", enqueued)
 	}
 }
 
 func TestAdminSeedCumulative(t *testing.T) {
+	// Phase 2: WAL 写入是异步的，测试只验证两次入队都成功
 	server, store := setupTestServer(t)
 	defer store.Close()
 
@@ -580,8 +586,17 @@ func TestAdminSeedCumulative(t *testing.T) {
 	w := httptest.NewRecorder()
 	server.Handler().ServeHTTP(w, req)
 
-	players1, _ := store.ListAll()
-	count1 := len(players1)
+	var resp1 map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp1)
+
+	if !resp1["ok"].(bool) {
+		t.Error("first seed should succeed")
+	}
+
+	enqueued1 := int(resp1["enqueued"].(float64))
+	if enqueued1 != 3 {
+		t.Errorf("first seed enqueued = %d, want 3", enqueued1)
+	}
 
 	// Second seed
 	form = url.Values{}
@@ -592,12 +607,19 @@ func TestAdminSeedCumulative(t *testing.T) {
 	w = httptest.NewRecorder()
 	server.Handler().ServeHTTP(w, req)
 
-	players2, _ := store.ListAll()
-	count2 := len(players2)
+	var resp2 map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp2)
 
-	if count2 != count1+2 {
-		t.Errorf("second seed should add to existing, got %d want %d", count2, count1+2)
+	if !resp2["ok"].(bool) {
+		t.Error("second seed should succeed")
 	}
+
+	enqueued2 := int(resp2["enqueued"].(float64))
+	if enqueued2 != 2 {
+		t.Errorf("second seed enqueued = %d, want 2", enqueued2)
+	}
+
+	// Phase 2: 不验证累加数据库内容，因为 WAL 刷盘是异步的
 }
 
 func TestAdminSeedNonLoopback(t *testing.T) {
@@ -672,7 +694,9 @@ func TestRefreshSuccess(t *testing.T) {
 
 	templatesFS := os.DirFS("../../web/templates")
 	staticFS := os.DirFS("../../web/static")
-	server, _ := New(store, testSrc, templatesFS, staticFS)
+	walMgr, _ := wal.New(tmpDir, 10)
+	t.Cleanup(func() { walMgr.Close() })
+	server, _ := New(store, testSrc, walMgr, templatesFS, staticFS)
 
 	form := url.Values{}
 	form.Set("online_id", "testuser")
@@ -855,7 +879,9 @@ func TestRefreshPreservesJoinedAt(t *testing.T) {
 
 	templatesFS := os.DirFS("../../web/templates")
 	staticFS := os.DirFS("../../web/static")
-	server, _ := New(store, testSrc, templatesFS, staticFS)
+	walMgr, _ := wal.New(tmpDir, 10)
+	t.Cleanup(func() { walMgr.Close() })
+	server, _ := New(store, testSrc, walMgr, templatesFS, staticFS)
 
 	form := url.Values{}
 	form.Set("online_id", "olduser")
@@ -934,7 +960,9 @@ func TestRefreshWithPage(t *testing.T) {
 
 	templatesFS := os.DirFS("../../web/templates")
 	staticFS := os.DirFS("../../web/static")
-	server, _ := New(store, testSrc, templatesFS, staticFS)
+	walMgr, _ := wal.New(tmpDir, 10)
+	t.Cleanup(func() { walMgr.Close() })
+	server, _ := New(store, testSrc, walMgr, templatesFS, staticFS)
 
 	form := url.Values{}
 	form.Set("online_id", "pageuser")
