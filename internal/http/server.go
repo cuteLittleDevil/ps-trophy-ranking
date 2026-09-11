@@ -51,6 +51,19 @@ func New(store *player.Store, source trophy.Source, templatesFS, staticFS fs.FS)
 		"lt":         func(a, b int) bool { return a < b },
 		"hasPrefix":  func(s, prefix string) bool { return strings.HasPrefix(s, prefix) },
 		"trimPrefix": func(s, prefix string) string { return strings.TrimPrefix(s, prefix) },
+		"slice": func(s string, start, end int) string {
+			if len(s) == 0 {
+				return "?"
+			}
+			if start >= len(s) {
+				return "?"
+			}
+			if end > len(s) {
+				end = len(s)
+			}
+			return s[start:end]
+		},
+		"toUpper": func(s string) string { return strings.ToUpper(s) },
 	}
 	
 	tmpl, err := template.New("").Funcs(funcMap).ParseFS(templatesFS, "*.html")
@@ -205,10 +218,21 @@ func (s *Server) handleJoin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate avatar URL: only accept https or empty
+	// Validate avatar URL: accept https, or http from Sony CDN
 	avatarURL := summary.AvatarURL
-	if avatarURL != "" && !strings.HasPrefix(avatarURL, "https://") {
-		avatarURL = "" // Reject non-https schemes, use placeholder
+	if avatarURL != "" {
+		if strings.HasPrefix(avatarURL, "http://") {
+			// Upgrade Sony CDN URLs from http to https
+			if strings.Contains(avatarURL, "static-resource.np.community.playstation.net") {
+				avatarURL = strings.Replace(avatarURL, "http://", "https://", 1)
+			} else {
+				// Reject other http URLs
+				avatarURL = ""
+			}
+		} else if !strings.HasPrefix(avatarURL, "https://") {
+			// Reject non-http(s) schemes
+			avatarURL = ""
+		}
 	}
 
 	p := player.Player{

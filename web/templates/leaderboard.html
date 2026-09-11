@@ -65,12 +65,13 @@
                         <td class="avatar-col">
                             {{if and .AvatarURL (hasPrefix .AvatarURL "https://")}}
                             <img src="{{.AvatarURL}}" 
-                                 alt="{{.DisplayID}}" 
-                                 onerror="this.src='/static/placeholder.png'">
+                                 alt="{{.DisplayID}}"
+                                 data-display-id="{{.DisplayID}}"
+                                 onerror="var letter = (this.dataset.displayId || '?').charAt(0).toUpperCase() || '?'; this.style.display='none'; var div = document.createElement('div'); div.className='avatar-letter'; div.textContent=letter; this.parentNode.appendChild(div);">
                             {{else if and .AvatarURL (hasPrefix .AvatarURL "letter:")}}
                             <div class="avatar-letter">{{trimPrefix .AvatarURL "letter:"}}</div>
                             {{else}}
-                            <img src="/static/placeholder.png" alt="{{.DisplayID}}">
+                            <div class="avatar-letter">{{toUpper (slice .DisplayID 0 1)}}</div>
                             {{end}}
                         </td>
                         <td class="id-col">{{.DisplayID}}</td>
