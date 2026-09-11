@@ -62,19 +62,23 @@ func main() {
 	// Phase 2: 启动时重放 sealed 段
 	slog.Info("Replaying sealed WAL segments...")
 	if err := walMgr.ReplaySealed(func(players []player.Player) error {
-		// 批量刷盘到 SQLite 并更新内存
+		// 批量刷盘到 SQLite
 		for _, p := range players {
 			if err := store.Upsert(p); err != nil {
 				return err
 			}
-			// 从 store 读取完整数据（含 JoinedAt）再更新内存
+		}
+		// 从 store 读取完整数据（含 JoinedAt）再批量更新内存
+		storedPlayers := make([]player.Player, 0, len(players))
+		for _, p := range players {
 			stored, err := store.Get(p.OnlineID)
 			if err == nil && stored != nil {
-				server.UpsertMemory(*stored)
+				storedPlayers = append(storedPlayers, *stored)
 			} else {
-				server.UpsertMemory(p)
+				storedPlayers = append(storedPlayers, p)
 			}
 		}
+		server.UpsertMemoryBatch(storedPlayers)
 		return nil
 	}); err != nil {
 		slog.Error("Failed to replay sealed segments", slog.String("error", err.Error()))
@@ -83,19 +87,23 @@ func main() {
 
 	// Phase 2: 启动封段 Worker
 	walMgr.StartSealing(cfg.WALSealIntervalMS, func(players []player.Player) error {
-		// 批量刷盘到 SQLite 并更新内存
+		// 批量刷盘到 SQLite
 		for _, p := range players {
 			if err := store.Upsert(p); err != nil {
 				return err
 			}
-			// 从 store 读取完整数据（含 JoinedAt）再更新内存
+		}
+		// 从 store 读取完整数据（含 JoinedAt）再批量更新内存
+		storedPlayers := make([]player.Player, 0, len(players))
+		for _, p := range players {
 			stored, err := store.Get(p.OnlineID)
 			if err == nil && stored != nil {
-				server.UpsertMemory(*stored)
+				storedPlayers = append(storedPlayers, *stored)
 			} else {
-				server.UpsertMemory(p)
+				storedPlayers = append(storedPlayers, p)
 			}
 		}
+		server.UpsertMemoryBatch(storedPlayers)
 		return nil
 	})
 

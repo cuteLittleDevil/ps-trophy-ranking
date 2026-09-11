@@ -715,3 +715,8 @@ func (s *Server) ReloadFromStore() error {
 func (s *Server) UpsertMemory(p player.Player) {
 	s.leaderboard.Upsert(p)
 }
+
+// UpsertMemoryBatch 批量更新玩家到内存排行榜（用于 WAL 刷盘）。
+func (s *Server) UpsertMemoryBatch(players []player.Player) {
+	s.leaderboard.UpsertBatch(players)
+}

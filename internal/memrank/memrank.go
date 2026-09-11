@@ -74,6 +74,29 @@ func (lb *Leaderboard) Upsert(p player.Player) {
 	lb.rebuildRankedLocked()
 }
 
+// UpsertBatch 批量更新或插入多个玩家到内存，只 rebuild 一次。
+// 用于 WAL flush 等批量更新场景，避免每个玩家都触发全量排序。
+func (lb *Leaderboard) UpsertBatch(players []player.Player) {
+	lb.mu.Lock()
+	defer lb.mu.Unlock()
+
+	for i := range players {
+		p := &players[i]
+		key := strings.ToLower(p.OnlineID)
+		stored := lb.players[key]
+		if stored == nil {
+			// 新玩家：分配新指针
+			stored = &player.Player{}
+			lb.players[key] = stored
+		}
+		// 更新所有字段
+		*stored = *p
+	}
+
+	// 只 rebuild 一次
+	lb.rebuildRankedLocked()
+}
+
 // Get 返回指定 online_id 的玩家及其排名信息。
 // 若不存在返回 nil。
 //
