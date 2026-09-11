@@ -210,7 +210,7 @@ func (c *Client) Lookup(ctx context.Context, onlineID string) (*Summary, error) 
 		AvatarURL:  resolved.avatarURL,
 		AccountID:  resolved.accountID,
 		Counts:     counts.earned,
-		Score:      Score(counts.earned.Bronze, counts.earned.Silver, counts.earned.Gold, counts.earned.Platinum),
+		Score:      counts.earned.Bronze*15 + counts.earned.Silver*30 + counts.earned.Gold*90 + counts.earned.Platinum*300,
 		TrophyJSON: counts.raw,
 	}, nil
 }

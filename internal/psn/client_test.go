@@ -9,6 +9,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"ps-trophy-ranking/internal/rank"
 )
 
 const secretNPSSO = "npsso-secret-token-do-not-leak-0123456789abcd"
@@ -53,7 +55,7 @@ func TestLookupOtherUser(t *testing.T) {
 	if sum.Counts != (Counts{Bronze: 10, Silver: 4, Gold: 2, Platinum: 1}) {
 		t.Fatalf("counts = %+v", sum.Counts)
 	}
-	if sum.Score != Score(10, 4, 2, 1) {
+	if sum.Score != rank.Score(10, 4, 2, 1) {
 		t.Fatalf("score = %d", sum.Score)
 	}
 	if sum.AvatarURL != "https://img.example/xl.png" {
@@ -80,7 +82,7 @@ func TestLookupSelfSkipsSearch(t *testing.T) {
 	if searched {
 		t.Fatal("search must not run for the authenticated account")
 	}
-	if sum.Score != Score(3, 2, 1, 0) {
+	if sum.Score != rank.Score(3, 2, 1, 0) {
 		t.Fatalf("score = %d", sum.Score)
 	}
 }
