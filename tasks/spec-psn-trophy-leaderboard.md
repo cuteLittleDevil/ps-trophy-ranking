@@ -520,6 +520,186 @@ v1 已在 main 交付（PR #4–#10，见 `提交历史说明.md`）。实现顺
 
 ---
 
+## 12. Unofficial PSN API（现场核对）
+
+核对日期：2026-09-10。凭证：运营侧 NPSSO → oauth access token（`--raw` 不打印 token）。现场账号：`cuteCleverDevil`（搜索 0 条，走 legacy）、`Astalosx`（搜索精确命中）。
+
+这些 URL 是非官方、可变的。实现把 base URL 放在 `internal/psn` 的 `Endpoints`，测试用 httptest 替换。
+
+### 12.1 认证（不 dump）
+
+| 步骤 | Method | URL | 要点 |
+|------|--------|-----|------|
+| NPSSO → code | GET | `https://ca.account.sony.com/api/authz/v3/oauth/authorize` | Cookie `npsso=`；读 302 `Location` 的 `code` |
+| code → token | POST | `https://ca.account.sony.com/api/authz/v3/oauth/token` | `grant_type=authorization_code`；响应含 `access_token` / `refresh_token`，禁止日志与 `--raw` |
+
+后续请求：`Authorization: Bearer <access_token>`。超时 10s，禁止自动重试。
+
+### 12.2 解析 Online ID 的调用链
+
+```
+GET  .../userProfile/v1/internal/users/me/profiles
+        │  400/404 或 onlineId 对不上
+        ▼
+POST .../search/v1/universalSearch   domain=SocialAllAccounts
+        │  无 onlineId 精确匹配（含 results=[]）
+        ▼
+GET  .../userProfile/v1/users/{onlineId}/profile2
+        │  仍无 accountId → not_found
+        ▼
+GET  .../trophy/v1/users/{accountId}/trophySummary
+```
+
+v1 **不调用**（有游戏详情，排行榜用不到）：
+
+| Method | URL | 内容 |
+|--------|-----|------|
+| GET | `.../trophy/v1/users/{accountId}/trophyTitles` | 每个游戏的名称、平台、该作奖杯数、进度；分页，`limit` 最大约 800 |
+| GET | `.../trophy/v1/users/{accountId}/npCommunicationIds/{id}/trophies` | 某一作每一枚奖杯是否已获 |
+
+### 12.3 `GET .../users/me/profiles`
+
+当前索尼不接受路径里的 `accountId=me`。现场：
+
+```json
+{
+  "error": {
+    "code": 2281473,
+    "message": "Bad Request (path: accountId)",
+    "referenceId": "<uuid>"
+  }
+}
+```
+
+| 字段 | 含义 | v1 |
+|------|------|-----|
+| `error.code` | 业务错误码。`2281473` = 路径 accountId 非法 | 400/404 时整段忽略，不当作用户不存在 |
+| `error.message` | 英文说明 | 不进页面 |
+| `error.referenceId` | 索尼侧追踪 ID | 不进页面、不进 error 字符串 |
+
+若未来 200 且 `onlineId` 与目标相同，accountId 用 `"me"`。
+
+### 12.4 `POST .../search/v1/universalSearch`
+
+请求：
+
+```json
+{
+  "searchTerm": "<online-id>",
+  "domainRequests": [{ "domain": "SocialAllAccounts" }]
+}
+```
+
+**规则：搜索是模糊的。必须 `strings.EqualFold(socialMetadata.onlineId, 目标)` 且 `accountId` 非空才算命中。** 取第一条精确命中即停。禁止用 `score` / `relevancyScore` 选人。
+
+现场 `astalosx`：第一条 `onlineId=Astalosx`（命中），第二条 `XxastalosxX209`（丢弃）。现场 `cutecleverdevil`：`results=[]`，`totalResultCount=0`，继续 legacy。
+
+#### 顶层
+
+| 字段 | 含义 | v1 |
+|------|------|-----|
+| `domainResponses` | 按搜索域分组的结果 | 只读 `SocialAllAccounts` |
+| `fallbackQueried` | 是否走了索尼内部兜底查询 | 忽略 |
+| `prefix` | 实际用于前缀匹配的词，通常等于 `searchTerm` | 忽略 |
+| `queryFrequency.filterDebounceMs` | 客户端过滤防抖建议（毫秒） | 忽略 |
+| `queryFrequency.searchDebounceMs` | 客户端搜索防抖建议 | 忽略 |
+| `responseStatus[].status` | 域级 HTTP 风格状态，字符串 `"200"` | 以真正 HTTP 状态为准 |
+| `responseStatus[].statusMessage` | 如 `"OK"` | 忽略 |
+| `strandPaginationResponse.lastPage` | 是否最后一页 | v1 不翻页 |
+| `strandPaginationResponse.offset` | 本页偏移 | 忽略 |
+| `strandPaginationResponse.pageSize` | 本页大小 | 忽略 |
+
+#### `domainResponses[]`
+
+| 字段 | 含义 | v1 |
+|------|------|-----|
+| `domain` | 域 ID，玩家搜索为 `SocialAllAccounts` | 不校验名字，遍历全部域找精确 ID |
+| `domainTitle` | 域标题，如「玩家」 | 忽略 |
+| `domainTitleHighlight` | 标题高亮分词 | 忽略 |
+| `domainTitleMessageId` | 文案 ID，如 `msgid_players` | 忽略 |
+| `domainExpandedTitle` | 带关键词的说明，如「名稱類似「astalosx」的玩家」 | 忽略；证明这是相似匹配不是精确查找 |
+| `next` | 下一页游标；空表示没有 | 忽略 |
+| `results` | 命中列表；可空 | 见下 |
+| `totalResultCount` | 本域条数 | 仅观测；0 不代表用户不存在 |
+| `zeroState` | 是否空态页 | 忽略 |
+
+#### `results[].socialMetadata`（及同级）
+
+| 字段 | 含义 | v1 |
+|------|------|-----|
+| `id` | 搜索结果内部 ID（非 PSN accountId） | 忽略 |
+| `type` | 如 `social` | 忽略 |
+| `score` / `relevancyScore` | 相关度；第一条不必是精确 ID | **禁止当选人依据** |
+| `socialMetadata.accountId` | 数字账号 ID，奖杯接口路径参数 | **必用** |
+| `socialMetadata.onlineId` | 官方展示用 PSN ID | **精确匹配 + DisplayID** |
+| `socialMetadata.avatarUrl` | 头像 URL | 可用 |
+| `socialMetadata.profilePicUrl` | 另一套头像（常为 playstation.com 图床） | 忽略；优先 `avatarUrl` |
+| `socialMetadata.accountType` | 如 `CUSTOMER` | 忽略 |
+| `socialMetadata.country` | 账号地区，如 `HK` | **不入库** |
+| `socialMetadata.language` | 界面语言，如 `zh` | **不入库** |
+| `socialMetadata.isPsPlus` | 是否 PS Plus | 忽略 |
+| `socialMetadata.isOfficiallyVerified` | 是否认证账号 | 忽略 |
+| `socialMetadata.verifiedUserName` | 认证名；常为空串 | 忽略 |
+| `socialMetadata.firstName` / `lastName` | 搜索里可能出现；现场像是 Online ID 被切开（`Astalosx` → `As` + `talos`），**不能当真实姓名** | **不入库、不上榜** |
+| `socialMetadata.highlights.*` | 高亮切分，标明哪一段匹配了搜索词 | 忽略 |
+
+### 12.5 `GET .../users/{onlineId}/profile2`（legacy）
+
+仅搜索无精确命中时调用。Query `fields=npId,onlineId,accountId,avatarUrls,trophySummary(@default,level,progress,earnedTrophies)`。
+
+用户不存在时响应体可带 `error`（仍可能 HTTP 200），视为未命中。
+
+legacy 头像常为 `http://static-resource.np.community.playstation.net/...`。HTTP 层按 5.2 升级为 https 后再入库；奖杯计数仍只信 `trophySummary`。
+
+| 字段 | 含义 | v1 |
+|------|------|-----|
+| `profile.accountId` | 数字账号 ID | **必用**（有则命中） |
+| `profile.onlineId` | 官方大小写 ID | DisplayID |
+| `profile.npId` | Base64 形式的内部 npId | 忽略 |
+| `profile.avatarUrls[].size` | 尺寸标记，如 `l` | 优先更大尺寸 |
+| `profile.avatarUrls[].avatarUrl` | 头像 URL | 可用（http 由 HTTP 层升级） |
+| `profile.trophySummary.earnedTrophies.*` | 与新接口同结构的奖杯计数 | **不用这套计数入榜**；仍打 `trophySummary` 新接口，避免两套数源 |
+| `profile.trophySummary.level` | 奖杯等级 | 忽略 |
+| `profile.trophySummary.progress` | 距下一级百分比 | 忽略 |
+| `error.code` / `error.message` | 如用户不存在 | 当未命中 |
+
+### 12.6 `GET .../trophy/v1/users/{accountId}/trophySummary`
+
+排行榜唯一奖杯数据源。路径必须是数字 `accountId`（或认证账号的 `me`），不是 Online ID。
+
+HTTP：403 → `private`；404 → `not_found`；401 → `invalid_credentials`；429/5xx → `upstream`。
+
+| 字段 | 含义 | 现场 `Astalosx` | v1 |
+|------|------|-----------------|-----|
+| `accountId` | 被查询账号 | `8552327274363529796` | 可校验，不入库为展示字段 |
+| `earnedTrophies.bronze` | 已获铜杯总数（全游戏合计） | 21251 | **入榜** |
+| `earnedTrophies.silver` | 已获银杯总数 | 7667 | **入榜** |
+| `earnedTrophies.gold` | 已获金杯总数 | 3468 | **入榜** |
+| `earnedTrophies.platinum` | 已获白金总数 | 731 | **入榜** |
+| `trophyLevel` | 奖杯等级 | 838 | 不入库 |
+| `tier` | 等级段 1–10（2020 年改制） | 9（金段，约 800–998 级） | 不入库 |
+| `progress` | 距下一级百分比 0–100 | 17 | 不入库 |
+| `trophyPoint` | 索尼侧总积分 | 1080195 | **不采用**；本地 `铜*15+银*30+金*90+白金*300`。现场两次查询均与该公式相等，仍以本地为准 |
+| `trophyLevelBasePoint` | 当前等级起始积分 | 1079640 | 忽略 |
+| `trophyLevelNextPoint` | 升到下一级所需积分 | 1082790 | 忽略 |
+
+`earnedTrophies` **没有分游戏**。游戏列表见 12.2 未调用端点。
+
+奖杯等级段（文档值，非索尼保证）：1–3 铜（1–299）、4–6 银（300–599）、7–9 金（600–998）、10 白金（999）。
+
+### 12.7 本工具输出与上游的对应
+
+CLI / 入榜记录只映射：
+
+| 输出 | 来源 |
+|------|------|
+| Online ID / DisplayID | 精确命中的 `onlineId`（搜索或 legacy） |
+| Platinum / Gold / Silver / Bronze | `trophySummary.earnedTrophies` |
+| Score | 本地公式 `rank.Score` |
+| Avatar | 搜索 `avatarUrl` 或 legacy `avatarUrls`（入库前按 5.2 清洗） |
+
+禁止把 `--raw` 的完整 JSON、token、`firstName`/`lastName`、`country` 写入排行榜库或 HTML。
+
 ---
 
 ## 13. 高吞吐写入演进架构（已批准，待实现）
@@ -809,185 +989,3 @@ score > 门槛分？
 - **第 10 节 Implementation Status**：标记本架构已落地；v1 行为迁移到「历史版本」子节
 
 **本次文档 PR** 不删除现有 v1 描述；只**增补**本节（第 13 节）说明演进设计，并在相关章节增加「见第 13 节」引用。
-
----
-
-## 12. Unofficial PSN API（现场核对）
-
-核对日期：2026-09-10。凭证：运营侧 NPSSO → oauth access token（`--raw` 不打印 token）。现场账号：`cuteCleverDevil`（搜索 0 条，走 legacy）、`Astalosx`（搜索精确命中）。
-
-这些 URL 是非官方、可变的。实现把 base URL 放在 `internal/psn` 的 `Endpoints`，测试用 httptest 替换。
-
-### 12.1 认证（不 dump）
-
-| 步骤 | Method | URL | 要点 |
-|------|--------|-----|------|
-| NPSSO → code | GET | `https://ca.account.sony.com/api/authz/v3/oauth/authorize` | Cookie `npsso=`；读 302 `Location` 的 `code` |
-| code → token | POST | `https://ca.account.sony.com/api/authz/v3/oauth/token` | `grant_type=authorization_code`；响应含 `access_token` / `refresh_token`，禁止日志与 `--raw` |
-
-后续请求：`Authorization: Bearer <access_token>`。超时 10s，禁止自动重试。
-
-### 12.2 解析 Online ID 的调用链
-
-```
-GET  .../userProfile/v1/internal/users/me/profiles
-        │  400/404 或 onlineId 对不上
-        ▼
-POST .../search/v1/universalSearch   domain=SocialAllAccounts
-        │  无 onlineId 精确匹配（含 results=[]）
-        ▼
-GET  .../userProfile/v1/users/{onlineId}/profile2
-        │  仍无 accountId → not_found
-        ▼
-GET  .../trophy/v1/users/{accountId}/trophySummary
-```
-
-v1 **不调用**（有游戏详情，排行榜用不到）：
-
-| Method | URL | 内容 |
-|--------|-----|------|
-| GET | `.../trophy/v1/users/{accountId}/trophyTitles` | 每个游戏的名称、平台、该作奖杯数、进度；分页，`limit` 最大约 800 |
-| GET | `.../trophy/v1/users/{accountId}/npCommunicationIds/{id}/trophies` | 某一作每一枚奖杯是否已获 |
-
-### 12.3 `GET .../users/me/profiles`
-
-当前索尼不接受路径里的 `accountId=me`。现场：
-
-```json
-{
-  "error": {
-    "code": 2281473,
-    "message": "Bad Request (path: accountId)",
-    "referenceId": "<uuid>"
-  }
-}
-```
-
-| 字段 | 含义 | v1 |
-|------|------|-----|
-| `error.code` | 业务错误码。`2281473` = 路径 accountId 非法 | 400/404 时整段忽略，不当作用户不存在 |
-| `error.message` | 英文说明 | 不进页面 |
-| `error.referenceId` | 索尼侧追踪 ID | 不进页面、不进 error 字符串 |
-
-若未来 200 且 `onlineId` 与目标相同，accountId 用 `"me"`。
-
-### 12.4 `POST .../search/v1/universalSearch`
-
-请求：
-
-```json
-{
-  "searchTerm": "<online-id>",
-  "domainRequests": [{ "domain": "SocialAllAccounts" }]
-}
-```
-
-**规则：搜索是模糊的。必须 `strings.EqualFold(socialMetadata.onlineId, 目标)` 且 `accountId` 非空才算命中。** 取第一条精确命中即停。禁止用 `score` / `relevancyScore` 选人。
-
-现场 `astalosx`：第一条 `onlineId=Astalosx`（命中），第二条 `XxastalosxX209`（丢弃）。现场 `cutecleverdevil`：`results=[]`，`totalResultCount=0`，继续 legacy。
-
-#### 顶层
-
-| 字段 | 含义 | v1 |
-|------|------|-----|
-| `domainResponses` | 按搜索域分组的结果 | 只读 `SocialAllAccounts` |
-| `fallbackQueried` | 是否走了索尼内部兜底查询 | 忽略 |
-| `prefix` | 实际用于前缀匹配的词，通常等于 `searchTerm` | 忽略 |
-| `queryFrequency.filterDebounceMs` | 客户端过滤防抖建议（毫秒） | 忽略 |
-| `queryFrequency.searchDebounceMs` | 客户端搜索防抖建议 | 忽略 |
-| `responseStatus[].status` | 域级 HTTP 风格状态，字符串 `"200"` | 以真正 HTTP 状态为准 |
-| `responseStatus[].statusMessage` | 如 `"OK"` | 忽略 |
-| `strandPaginationResponse.lastPage` | 是否最后一页 | v1 不翻页 |
-| `strandPaginationResponse.offset` | 本页偏移 | 忽略 |
-| `strandPaginationResponse.pageSize` | 本页大小 | 忽略 |
-
-#### `domainResponses[]`
-
-| 字段 | 含义 | v1 |
-|------|------|-----|
-| `domain` | 域 ID，玩家搜索为 `SocialAllAccounts` | 不校验名字，遍历全部域找精确 ID |
-| `domainTitle` | 域标题，如「玩家」 | 忽略 |
-| `domainTitleHighlight` | 标题高亮分词 | 忽略 |
-| `domainTitleMessageId` | 文案 ID，如 `msgid_players` | 忽略 |
-| `domainExpandedTitle` | 带关键词的说明，如「名稱類似「astalosx」的玩家」 | 忽略；证明这是相似匹配不是精确查找 |
-| `next` | 下一页游标；空表示没有 | 忽略 |
-| `results` | 命中列表；可空 | 见下 |
-| `totalResultCount` | 本域条数 | 仅观测；0 不代表用户不存在 |
-| `zeroState` | 是否空态页 | 忽略 |
-
-#### `results[].socialMetadata`（及同级）
-
-| 字段 | 含义 | v1 |
-|------|------|-----|
-| `id` | 搜索结果内部 ID（非 PSN accountId） | 忽略 |
-| `type` | 如 `social` | 忽略 |
-| `score` / `relevancyScore` | 相关度；第一条不必是精确 ID | **禁止当选人依据** |
-| `socialMetadata.accountId` | 数字账号 ID，奖杯接口路径参数 | **必用** |
-| `socialMetadata.onlineId` | 官方展示用 PSN ID | **精确匹配 + DisplayID** |
-| `socialMetadata.avatarUrl` | 头像 URL | 可用 |
-| `socialMetadata.profilePicUrl` | 另一套头像（常为 playstation.com 图床） | 忽略；优先 `avatarUrl` |
-| `socialMetadata.accountType` | 如 `CUSTOMER` | 忽略 |
-| `socialMetadata.country` | 账号地区，如 `HK` | **不入库** |
-| `socialMetadata.language` | 界面语言，如 `zh` | **不入库** |
-| `socialMetadata.isPsPlus` | 是否 PS Plus | 忽略 |
-| `socialMetadata.isOfficiallyVerified` | 是否认证账号 | 忽略 |
-| `socialMetadata.verifiedUserName` | 认证名；常为空串 | 忽略 |
-| `socialMetadata.firstName` / `lastName` | 搜索里可能出现；现场像是 Online ID 被切开（`Astalosx` → `As` + `talos`），**不能当真实姓名** | **不入库、不上榜** |
-| `socialMetadata.highlights.*` | 高亮切分，标明哪一段匹配了搜索词 | 忽略 |
-
-### 12.5 `GET .../users/{onlineId}/profile2`（legacy）
-
-仅搜索无精确命中时调用。Query `fields=npId,onlineId,accountId,avatarUrls,trophySummary(@default,level,progress,earnedTrophies)`。
-
-用户不存在时响应体可带 `error`（仍可能 HTTP 200），视为未命中。
-
-legacy 头像常为 `http://static-resource.np.community.playstation.net/...`。HTTP 层按 5.2 升级为 https 后再入库；奖杯计数仍只信 `trophySummary`。
-
-| 字段 | 含义 | v1 |
-|------|------|-----|
-| `profile.accountId` | 数字账号 ID | **必用**（有则命中） |
-| `profile.onlineId` | 官方大小写 ID | DisplayID |
-| `profile.npId` | Base64 形式的内部 npId | 忽略 |
-| `profile.avatarUrls[].size` | 尺寸标记，如 `l` | 优先更大尺寸 |
-| `profile.avatarUrls[].avatarUrl` | 头像 URL | 可用（http 由 HTTP 层升级） |
-| `profile.trophySummary.earnedTrophies.*` | 与新接口同结构的奖杯计数 | **不用这套计数入榜**；仍打 `trophySummary` 新接口，避免两套数源 |
-| `profile.trophySummary.level` | 奖杯等级 | 忽略 |
-| `profile.trophySummary.progress` | 距下一级百分比 | 忽略 |
-| `error.code` / `error.message` | 如用户不存在 | 当未命中 |
-
-### 12.6 `GET .../trophy/v1/users/{accountId}/trophySummary`
-
-排行榜唯一奖杯数据源。路径必须是数字 `accountId`（或认证账号的 `me`），不是 Online ID。
-
-HTTP：403 → `private`；404 → `not_found`；401 → `invalid_credentials`；429/5xx → `upstream`。
-
-| 字段 | 含义 | 现场 `Astalosx` | v1 |
-|------|------|-----------------|-----|
-| `accountId` | 被查询账号 | `8552327274363529796` | 可校验，不入库为展示字段 |
-| `earnedTrophies.bronze` | 已获铜杯总数（全游戏合计） | 21251 | **入榜** |
-| `earnedTrophies.silver` | 已获银杯总数 | 7667 | **入榜** |
-| `earnedTrophies.gold` | 已获金杯总数 | 3468 | **入榜** |
-| `earnedTrophies.platinum` | 已获白金总数 | 731 | **入榜** |
-| `trophyLevel` | 奖杯等级 | 838 | 不入库 |
-| `tier` | 等级段 1–10（2020 年改制） | 9（金段，约 800–998 级） | 不入库 |
-| `progress` | 距下一级百分比 0–100 | 17 | 不入库 |
-| `trophyPoint` | 索尼侧总积分 | 1080195 | **不采用**；本地 `铜*15+银*30+金*90+白金*300`。现场两次查询均与该公式相等，仍以本地为准 |
-| `trophyLevelBasePoint` | 当前等级起始积分 | 1079640 | 忽略 |
-| `trophyLevelNextPoint` | 升到下一级所需积分 | 1082790 | 忽略 |
-
-`earnedTrophies` **没有分游戏**。游戏列表见 12.2 未调用端点。
-
-奖杯等级段（文档值，非索尼保证）：1–3 铜（1–299）、4–6 银（300–599）、7–9 金（600–998）、10 白金（999）。
-
-### 12.7 本工具输出与上游的对应
-
-CLI / 入榜记录只映射：
-
-| 输出 | 来源 |
-|------|------|
-| Online ID / DisplayID | 精确命中的 `onlineId`（搜索或 legacy） |
-| Platinum / Gold / Silver / Bronze | `trophySummary.earnedTrophies` |
-| Score | 本地公式 `rank.Score` |
-| Avatar | 搜索 `avatarUrl` 或 legacy `avatarUrls`（入库前按 5.2 清洗） |
-
-禁止把 `--raw` 的完整 JSON、token、`firstName`/`lastName`、`country` 写入排行榜库或 HTML。
