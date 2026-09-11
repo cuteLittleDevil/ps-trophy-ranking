@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"io"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"ps-trophy-ranking/internal/player"
@@ -151,7 +151,7 @@ func (m *Manager) StartSealing(intervalMS int, flushFunc func([]player.Player) e
 				// 依次封段、读取、刷盘、删除
 				for i := 0; i < m.shardCount; i++ {
 					if err := m.sealAndFlush(i, flushFunc); err != nil {
-						log.Printf("seal and flush shard %d: %v", i, err)
+						slog.Error("Failed to seal and flush shard", slog.Int("shard", i), slog.String("error", err.Error()))
 					}
 				}
 			case <-m.stopCh:
@@ -194,7 +194,7 @@ func (m *Manager) sealAndFlush(shardIdx int, flushFunc func([]player.Player) err
 	
 	// 关闭当前文件句柄
 	if err := m.shardFiles[shardIdx].Close(); err != nil {
-		log.Printf("close shard file before rename: %v", err)
+		slog.Warn("Failed to close shard file before rename", slog.Int("shard", shardIdx), slog.String("error", err.Error()))
 	}
 
 	// Rename
@@ -232,7 +232,7 @@ func (m *Manager) sealAndFlush(shardIdx int, flushFunc func([]player.Player) err
 
 	// 6. 成功后删除 sealed 文件
 	if err := os.Remove(sealedPath); err != nil {
-		log.Printf("remove sealed file: %v", err)
+		slog.Warn("Failed to remove sealed file", slog.String("path", sealedPath), slog.String("error", err.Error()))
 	}
 
 	return nil
@@ -257,7 +257,7 @@ func (m *Manager) readSealed(path string) ([]player.Player, error) {
 				break
 			}
 			// 跳过损坏的行
-			log.Printf("skip invalid event in %s: %v", path, err)
+			slog.Warn("Skipping invalid event in sealed file", slog.String("path", path), slog.String("error", err.Error()))
 			continue
 		}
 
@@ -325,14 +325,14 @@ func (m *Manager) ReplaySealed(flushFunc func([]player.Player) error) error {
 		return tsI < tsJ
 	})
 
-	log.Printf("Replaying %d sealed files", len(sealedFiles))
+	slog.Info("Replaying sealed WAL files", slog.Int("count", len(sealedFiles)))
 
 	// 依次重放
 	for _, name := range sealedFiles {
 		path := filepath.Join(m.dir, name)
 		players, err := m.readSealed(path)
 		if err != nil {
-			log.Printf("read sealed file %s: %v", name, err)
+			slog.Error("Failed to read sealed file", slog.String("name", name), slog.String("error", err.Error()))
 			continue
 		}
 
@@ -344,16 +344,16 @@ func (m *Manager) ReplaySealed(flushFunc func([]player.Player) error) error {
 
 		// 批量刷盘
 		if err := flushFunc(players); err != nil {
-			log.Printf("replay flush failed for %s: %v", name, err)
+			slog.Error("Replay flush failed", slog.String("name", name), slog.String("error", err.Error()))
 			// 失败时不删除文件，下次启动继续重放
 			continue
 		}
 
 		// 成功后删除
 		if err := os.Remove(path); err != nil {
-			log.Printf("remove replayed sealed file %s: %v", name, err)
+			slog.Warn("Failed to remove replayed sealed file", slog.String("name", name), slog.String("error", err.Error()))
 		} else {
-			log.Printf("Replayed and removed: %s", name)
+			slog.Info("Replayed and removed sealed file", slog.String("name", name))
 		}
 	}
 
