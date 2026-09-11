@@ -163,55 +163,18 @@ func (m *Manager) StartSealing(intervalMS int, flushFunc func([]player.Player) e
 
 // sealAndFlush 执行单个分片的封段、读取、刷盘、删除流程
 func (m *Manager) sealAndFlush(shardIdx int, flushFunc func([]player.Player) error) error {
-	m.shardMu[shardIdx].Lock()
-	defer m.shardMu[shardIdx].Unlock()
-
-	shardPath := filepath.Join(m.dir, fmt.Sprintf("shard-%d.log", shardIdx))
-	
-	// 检查文件是否有内容
-	info, err := os.Stat(shardPath)
+	// 步骤 1-2：持锁进行 rename 和创建新文件（快速）
+	sealedPath, err := m.sealShard(shardIdx)
 	if err != nil {
-		if os.IsNotExist(err) {
-			// 文件不存在，重新创建
-			f, err := os.OpenFile(shardPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
-			if err != nil {
-				return fmt.Errorf("recreate shard file: %w", err)
-			}
-			m.shardFiles[shardIdx].Close()
-			m.shardFiles[shardIdx] = f
-			return nil
-		}
-		return fmt.Errorf("stat shard file: %w", err)
+		return err
 	}
-
-	// 如果文件为空，不需要封段
-	if info.Size() == 0 {
+	
+	// 如果没有封段文件（空文件被跳过），直接返回
+	if sealedPath == "" {
 		return nil
 	}
 
-	// 1. Rename 封段（原子操作）
-	sealedPath := filepath.Join(m.dir, fmt.Sprintf("shard-%d.log.%s%d", shardIdx, SealedPrefix, time.Now().Unix()))
-	
-	// 关闭当前文件句柄
-	if err := m.shardFiles[shardIdx].Close(); err != nil {
-		slog.Warn("Failed to close shard file before rename", slog.Int("shard", shardIdx), slog.String("error", err.Error()))
-	}
-
-	// Rename
-	if err := os.Rename(shardPath, sealedPath); err != nil {
-		// Rename 失败，重新打开原文件
-		f, _ := os.OpenFile(shardPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
-		m.shardFiles[shardIdx] = f
-		return fmt.Errorf("rename to sealed: %w", err)
-	}
-
-	// 2. 创建新的空 shard-N.log
-	newFile, err := os.OpenFile(shardPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
-	if err != nil {
-		return fmt.Errorf("create new shard file: %w", err)
-	}
-	m.shardFiles[shardIdx] = newFile
-
+	// 步骤 3-6：在锁外进行读取、刷盘、删除（慢速操作）
 	// 3. 读取 sealed 段
 	players, err := m.readSealed(sealedPath)
 	if err != nil {
@@ -236,6 +199,61 @@ func (m *Manager) sealAndFlush(shardIdx int, flushFunc func([]player.Player) err
 	}
 
 	return nil
+}
+
+// sealShard 持锁进行 rename 和创建新文件，返回 sealed 文件路径
+// 返回空字符串表示无需封段（文件为空或不存在）
+func (m *Manager) sealShard(shardIdx int) (string, error) {
+	m.shardMu[shardIdx].Lock()
+	defer m.shardMu[shardIdx].Unlock()
+
+	shardPath := filepath.Join(m.dir, fmt.Sprintf("shard-%d.log", shardIdx))
+	
+	// 检查文件是否有内容
+	info, err := os.Stat(shardPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// 文件不存在，重新创建
+			f, err := os.OpenFile(shardPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+			if err != nil {
+				return "", fmt.Errorf("recreate shard file: %w", err)
+			}
+			m.shardFiles[shardIdx].Close()
+			m.shardFiles[shardIdx] = f
+			return "", nil
+		}
+		return "", fmt.Errorf("stat shard file: %w", err)
+	}
+
+	// 如果文件为空，不需要封段
+	if info.Size() == 0 {
+		return "", nil
+	}
+
+	// 1. Rename 封段（原子操作）
+	sealedPath := filepath.Join(m.dir, fmt.Sprintf("shard-%d.log.%s%d", shardIdx, SealedPrefix, time.Now().Unix()))
+	
+	// 关闭当前文件句柄
+	if err := m.shardFiles[shardIdx].Close(); err != nil {
+		slog.Warn("Failed to close shard file before rename", slog.Int("shard", shardIdx), slog.String("error", err.Error()))
+	}
+
+	// Rename
+	if err := os.Rename(shardPath, sealedPath); err != nil {
+		// Rename 失败，重新打开原文件
+		f, _ := os.OpenFile(shardPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+		m.shardFiles[shardIdx] = f
+		return "", fmt.Errorf("rename to sealed: %w", err)
+	}
+
+	// 2. 创建新的空 shard-N.log
+	newFile, err := os.OpenFile(shardPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		return "", fmt.Errorf("create new shard file: %w", err)
+	}
+	m.shardFiles[shardIdx] = newFile
+
+	return sealedPath, nil
 }
 
 // readSealed 读取 sealed 文件并去重（保留最新事件）
