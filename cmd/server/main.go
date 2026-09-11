@@ -2,7 +2,7 @@ package main
 
 import (
 	"io/fs"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -18,22 +18,25 @@ import (
 func main() {
 	cfg := config.Load()
 
-	log.Printf("Starting PSN Trophy Leaderboard server")
-	log.Printf("Database: %s", cfg.DBPath)
-	log.Printf("Listen address: %s", cfg.ListenAddr)
-	log.Printf("WAL directory: %s", cfg.WALDir)
+	slog.Info("Starting PSN Trophy Leaderboard server")
+	slog.Info("Configuration loaded", 
+		slog.String("db_path", cfg.DBPath),
+		slog.String("listen_addr", cfg.ListenAddr),
+		slog.String("wal_dir", cfg.WALDir))
 
 	if cfg.PSNNPSSO == "" {
-		log.Println("Warning: PSN_NPSSO not set. /join endpoint will return 'no_credentials' error.")
+		slog.Warn("PSN_NPSSO not set, /join endpoint will return 'no_credentials' error")
 	}
 
 	if err := os.MkdirAll(filepath.Dir(cfg.DBPath), 0755); err != nil {
-		log.Fatalf("create data directory: %v", err)
+		slog.Error("Failed to create data directory", slog.String("error", err.Error()))
+		os.Exit(1)
 	}
 
 	store, err := player.Open(cfg.DBPath)
 	if err != nil {
-		log.Fatalf("open player store: %v", err)
+		slog.Error("Failed to open player store", slog.String("error", err.Error()))
+		os.Exit(1)
 	}
 	defer store.Close()
 
@@ -43,7 +46,8 @@ func main() {
 	// Phase 2: 初始化 WAL Manager
 	walMgr, err := wal.New(cfg.WALDir, 10)
 	if err != nil {
-		log.Fatalf("create wal manager: %v", err)
+		slog.Error("Failed to create WAL manager", slog.String("error", err.Error()))
+		os.Exit(1)
 	}
 	defer walMgr.Close()
 
@@ -51,11 +55,12 @@ func main() {
 
 	server, err := httpserver.New(store, source, walMgr, templatesFS, staticFS)
 	if err != nil {
-		log.Fatalf("create HTTP server: %v", err)
+		slog.Error("Failed to create HTTP server", slog.String("error", err.Error()))
+		os.Exit(1)
 	}
 
 	// Phase 2: 启动时重放 sealed 段
-	log.Println("Replaying sealed WAL segments...")
+	slog.Info("Replaying sealed WAL segments...")
 	if err := walMgr.ReplaySealed(func(players []player.Player) error {
 		// 批量刷盘到 SQLite 并更新内存
 		for _, p := range players {
@@ -72,7 +77,8 @@ func main() {
 		}
 		return nil
 	}); err != nil {
-		log.Fatalf("replay sealed segments: %v", err)
+		slog.Error("Failed to replay sealed segments", slog.String("error", err.Error()))
+		os.Exit(1)
 	}
 
 	// Phase 2: 启动封段 Worker
@@ -93,13 +99,16 @@ func main() {
 		return nil
 	})
 
-	log.Printf("WAL sealing worker started (interval: %dms)", cfg.WALSealIntervalMS)
+	slog.Info("WAL sealing worker started", slog.Int("interval_ms", cfg.WALSealIntervalMS))
 
-	log.Printf("Server listening on http://%s", cfg.ListenAddr)
-	log.Printf("Open http://%s in your browser", cfg.ListenAddr)
+	slog.Info("Server listening",
+		slog.String("addr", cfg.ListenAddr),
+		slog.String("url", "http://"+cfg.ListenAddr),
+		slog.String("pprof", "http://"+cfg.ListenAddr+"/debug/pprof/"))
 
 	if err := http.ListenAndServe(cfg.ListenAddr, server.Handler()); err != nil {
-		log.Fatalf("server error: %v", err)
+		slog.Error("Server error", slog.String("error", err.Error()))
+		os.Exit(1)
 	}
 }
 
@@ -110,10 +119,11 @@ func getWebFS() (templatesFS, staticFS fs.FS) {
 	if _, err := os.Stat(templatesPath); err == nil {
 		templatesFS = os.DirFS(templatesPath)
 		staticFS = os.DirFS(staticPath)
-		log.Printf("Using web files from disk")
+		slog.Info("Using web files from disk")
 		return
 	}
 	
-	log.Fatalf("web/templates and web/static directories not found")
+	slog.Error("web/templates and web/static directories not found")
+	os.Exit(1)
 	return
 }

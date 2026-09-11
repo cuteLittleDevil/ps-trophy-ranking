@@ -73,8 +73,12 @@ curl -X POST "http://127.0.0.1:8080/admin/seed?count=100"
 - **奖杯数**：合理随机（铜 0–5000、银 0–2000、金 0–800、白金 0–200）
 - **头像**：A–Z 随机字母占位
 - **每次追加**，不清空数据库；生成时查重保证 UNIQUE
+- **硬顶限制**：单次请求最多 **1,000,000**（100 万）条，超过返回 400 错误
 - **鉴权**：只接受回环地址（127.0.0.1、::1），非回环返回 403。若绑到公网 IP 自行承担风险
 - **Phase 2**：模拟数据通过 WAL 分片文件异步写入，可见延迟约 100ms-1s；支持大批量灌数（如 10000+）
+- **性能优化**：
+  - WAL 封段 flush 已优化：文件 rename 和创建在锁内（毫秒级），读取、解析、DB upsert、内存更新在锁外
+  - 即使 seed count=10000，也能秒级返回 `enqueued` 状态，不会卡住
 
 ## 配置
 
@@ -85,6 +89,41 @@ curl -X POST "http://127.0.0.1:8080/admin/seed?count=100"
 | `PSN_NPSSO` | 空 | Sony NPSSO cookie（`/join` 端点必需） |
 | `DB_PATH` | `./data/leaderboard.db` | SQLite 数据库文件路径 |
 | `LISTEN_ADDR` | `127.0.0.1:8080` | HTTP 监听地址（`/admin/seed` 无鉴权，建议只绑本机）|
+
+## 可观测性
+
+### pprof 性能分析
+
+服务启动后自动在 `/debug/pprof/` 路径启用 Go pprof 性能分析：
+
+```bash
+# CPU profile（采样 30 秒）
+curl http://127.0.0.1:8080/debug/pprof/profile?seconds=30 > cpu.prof
+go tool pprof -http=:6060 cpu.prof
+
+# Heap profile
+curl http://127.0.0.1:8080/debug/pprof/heap > heap.prof
+go tool pprof -http=:6060 heap.prof
+
+# Goroutine 堆栈
+curl http://127.0.0.1:8080/debug/pprof/goroutine?debug=1
+
+# 在线查看（浏览器打开）
+open http://127.0.0.1:8080/debug/pprof/
+```
+
+**安全提示**：pprof 仅在本机访问（与主服务共用 `LISTEN_ADDR`），生产环境切勿绑定到公网 IP。
+
+### 日志
+
+- **日志库**：使用 Go 标准库 `log/slog`（结构化日志）
+- **输出**：默认 `TextHandler` 输出到 `stderr`
+- **关键事件**：
+  - 启动与初始化（加载玩家数量、内存排行榜门槛分）
+  - WAL 封段与刷盘（批次大小、耗时）
+  - PSN API 调用失败（不记录敏感凭证）
+  - 错误与异常（含上下文字段）
+- **安全**：**禁止**将 `PSN_NPSSO`、access token 等敏感凭证打印到日志
 
 ## 拉取某个 PSN 账号的奖杯（CLI）
 

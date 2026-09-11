@@ -6,10 +6,11 @@ import (
 	"fmt"
 	"html/template"
 	"io/fs"
-	"log"
+	"log/slog"
 	"math/rand"
 	"net"
 	"net/http"
+	"net/http/pprof"
 	"net/url"
 	"ps-trophy-ranking/internal/memrank"
 	"ps-trophy-ranking/internal/player"
@@ -81,10 +82,11 @@ func New(store *player.Store, source trophy.Source, walMgr *wal.Manager, templat
 	if err != nil {
 		return nil, fmt.Errorf("load initial leaderboard: %w", err)
 	}
-	log.Printf("Loading %d players into memory leaderboard", len(players))
+	slog.Info("Loading players into memory leaderboard", slog.Int("count", len(players)))
 	leaderboard.Load(players)
-	log.Printf("Memory leaderboard initialized: %d players, threshold score: %d", 
-		leaderboard.Count(), leaderboard.ThresholdScore())
+	slog.Info("Memory leaderboard initialized", 
+		slog.Int("total_players", leaderboard.Count()),
+		slog.Int("threshold_score", leaderboard.ThresholdScore()))
 
 	return &Server{
 		store:       store,
@@ -103,6 +105,19 @@ func (s *Server) Handler() http.Handler {
 	
 	// Middleware
 	r.Use(middleware.Recoverer)
+	
+	// pprof routes (显式挂载，不依赖 http.DefaultServeMux)
+	r.HandleFunc("/debug/pprof/", pprof.Index)
+	r.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	r.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	r.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	r.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	r.Handle("/debug/pprof/heap", pprof.Handler("heap"))
+	r.Handle("/debug/pprof/allocs", pprof.Handler("allocs"))
+	r.Handle("/debug/pprof/block", pprof.Handler("block"))
+	r.Handle("/debug/pprof/goroutine", pprof.Handler("goroutine"))
+	r.Handle("/debug/pprof/mutex", pprof.Handler("mutex"))
+	r.Handle("/debug/pprof/threadcreate", pprof.Handler("threadcreate"))
 	
 	// Routes
 	r.Get("/", s.handleHome)
@@ -192,7 +207,7 @@ func (s *Server) handleJoin(w http.ResponseWriter, r *http.Request) {
 	// Check store-based cooldown for PSN syncs
 	existing, err := s.store.Get(onlineID)
 	if err != nil {
-		log.Printf("check cooldown: %v", err)
+		slog.Warn("Failed to check cooldown", slog.String("error", err.Error()), slog.String("online_id", onlineID))
 	}
 	if existing != nil && time.Since(existing.SyncedAt) < 15*time.Minute {
 		s.renderError(w, "同步过于频繁", onlineID)
@@ -246,7 +261,7 @@ func (s *Server) handleJoin(w http.ResponseWriter, r *http.Request) {
 
 	// Phase 1: 同步 Upsert SQLite
 	if err := s.store.Upsert(p); err != nil {
-		log.Printf("upsert player: %v", err)
+		slog.Error("Failed to upsert player", slog.String("error", err.Error()), slog.String("online_id", summary.OnlineID))
 		s.renderError(w, "无法保存排行榜数据", onlineID)
 		return
 	}
@@ -254,7 +269,7 @@ func (s *Server) handleJoin(w http.ResponseWriter, r *http.Request) {
 	// Phase 1: 从 store 读取完整数据（含 JoinedAt）再更新内存
 	stored, err := s.store.Get(summary.OnlineID)
 	if err != nil {
-		log.Printf("get player after upsert: %v", err)
+		slog.Warn("Failed to get player after upsert", slog.String("error", err.Error()), slog.String("online_id", summary.OnlineID))
 		s.leaderboard.Upsert(p)
 	} else if stored != nil {
 		s.leaderboard.Upsert(*stored)
@@ -292,7 +307,7 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	// Check if player is on the leaderboard
 	existing, err := s.store.Get(onlineID)
 	if err != nil {
-		log.Printf("check existing player: %v", err)
+		slog.Warn("Failed to check existing player", slog.String("error", err.Error()), slog.String("online_id", onlineID))
 		s.renderError(w, "查找失败", onlineID)
 		return
 	}
@@ -356,7 +371,7 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 
 	// Phase 1: 同步 Upsert SQLite
 	if err := s.store.Upsert(p); err != nil {
-		log.Printf("upsert player: %v", err)
+		slog.Error("Failed to upsert player", slog.String("error", err.Error()), slog.String("online_id", summary.OnlineID))
 		s.renderError(w, "无法保存排行榜数据", onlineID)
 		return
 	}
@@ -364,7 +379,7 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	// Phase 1: 从 store 读取完整数据（含 JoinedAt）再更新内存
 	stored, err := s.store.Get(summary.OnlineID)
 	if err != nil {
-		log.Printf("get player after upsert: %v", err)
+		slog.Warn("Failed to get player after upsert", slog.String("error", err.Error()), slog.String("online_id", summary.OnlineID))
 		s.leaderboard.Upsert(p)
 	} else if stored != nil {
 		s.leaderboard.Upsert(*stored)
@@ -500,7 +515,7 @@ func mapTrophyError(err error) string {
 func (s *Server) render(w http.ResponseWriter, data pageData) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := s.tmpl.ExecuteTemplate(w, "leaderboard.html", data); err != nil {
-		log.Printf("render template: %v", err)
+		slog.Error("Failed to render template", slog.String("error", err.Error()))
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 	}
 }
@@ -534,6 +549,7 @@ const (
 	maxSeedRetry = 10
 	seedIDPrefix = "sim"
 	seedIDMaxNum = 10000000 // 7 digits: sim + 7 digits = 10 chars, well under 16
+	maxSeedCount = 1000000  // 硬顶 100 万
 )
 
 // handleAdminSeed seeds the database with simulated users via WAL (Phase 2).
@@ -568,6 +584,16 @@ func (s *Server) handleAdminSeed(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if count > maxSeedCount {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"ok":    false,
+			"error": fmt.Sprintf("count exceeds maximum limit of %d", maxSeedCount),
+		})
+		return
+	}
+
 	enqueued := 0
 	failed := 0
 	
@@ -586,7 +612,7 @@ func (s *Server) handleAdminSeed(w http.ResponseWriter, r *http.Request) {
 			
 			// Validate length (must be 3-16 chars)
 			if len(onlineID) < minIDLength || len(onlineID) > maxIDLength {
-				log.Printf("generated ID length invalid: %d", len(onlineID))
+				slog.Warn("Generated ID length invalid", slog.Int("length", len(onlineID)))
 				failed++
 				break
 			}
@@ -599,7 +625,7 @@ func (s *Server) handleAdminSeed(w http.ResponseWriter, r *http.Request) {
 			
 			retries++
 			if retries >= maxSeedRetry {
-				log.Printf("failed to generate unique ID after %d retries", maxSeedRetry)
+				slog.Warn("Failed to generate unique ID after retries", slog.Int("max_retries", maxSeedRetry))
 				failed++
 				break
 			}
@@ -632,7 +658,7 @@ func (s *Server) handleAdminSeed(w http.ResponseWriter, r *http.Request) {
 
 		// Phase 2: 追加到 WAL，立即返回
 		if err := s.walMgr.Append(p); err != nil {
-			log.Printf("seed wal append: %v", err)
+			slog.Error("Failed to append to WAL", slog.String("error", err.Error()), slog.String("online_id", onlineID))
 			failed++
 			continue
 		}

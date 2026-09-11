@@ -230,10 +230,12 @@ v1 对外是 HTML 页面和表单；`/admin/seed` 是本机 JSON 管理接口，
 **POST `/admin/seed`**
 
 - 仅回环：`127.0.0.1`、`::1`、`localhost`、`127.0.0.0/8`；否则 403 `{"ok":false,"error":"access denied: seed endpoint only accessible from localhost"}`
-- `count`：正整数；缺省/非法/≤0 → 400；`>1000` → 400（上限文案含 `1000`）
+- `count`：正整数；缺省/非法/≤0 → 400；**`>1000000`（100万）→ 400**（上限文案含 `1000000`）
 - 每次追加，不清空库。ID：`sim` + 7 位定宽十进制（如 `sim0000123`），总长 10；碰撞最多重试 10 次，计入 `failed`
 - 奖杯：铜 0–5000、银 0–2000、金 0–800、白金 0–200；积分 `rank.Score`；头像 `letter:` + A–Z
-- 成功 200：`{"ok":true,"inserted":N,"failed":M}`；一个都插不进 → 500 `{"ok":false,"error":"failed to insert any users"}`
+- **Phase 2 后**：追加到 WAL，立即返回 `{"ok":true,"enqueued":N,"failed":M}`（含 `enqueued` 字段表示已入队）；实际写入 SQLite 延迟约 100ms–1s
+- **WAL 语义**：`/admin/seed` 返回 200 时，数据已持久化到 WAL 文件（仅剩刷盘窗口 ≤1s 丢失风险）
+- **可见延迟**：冷路径用户约 100ms–1s 后可在排行榜查到；热路径（高分冲榜）实时可见
 
 ### 4.3 Error Responses
 
@@ -410,6 +412,34 @@ v1 无登录。看榜、入榜、查找、刷新均公开。不实现 CSRF token
 - `.env` gitignore；提交 `.env.example`（无真实值；三项：`PSN_NPSSO`、`DB_PATH`、`LISTEN_ADDR`）
 - 头像允许热链 Sony CDN；失败用首字母块，不把上游 cookie 当图片参数
 - 搜索结果里的 `firstName` / `lastName` / `country` / `language` 不得入库、不得上排行榜；v1 只用 `accountId`、`onlineId`、`avatarUrl`
+
+---
+
+## 7.5 可观测性与性能分析
+
+### 7.5.1 pprof 监控
+
+- **挂载路径**：`/debug/pprof/*` 使用 `net/http/pprof` 标准库包自动注册
+- **访问限制**：与主服务共享 `LISTEN_ADDR`，默认 `127.0.0.1:8080`（仅本机可访问）
+- **生产部署**：**禁止对公网暴露 pprof**；与 `/admin/seed` 一样靠 `127.0.0.1` 绑定本机
+- **用法示例**：
+  - CPU profile：`curl http://127.0.0.1:8080/debug/pprof/profile?seconds=30 > cpu.prof`
+  - Heap profile：`curl http://127.0.0.1:8080/debug/pprof/heap > heap.prof`
+  - Goroutine：`curl http://127.0.0.1:8080/debug/pprof/goroutine > goroutine.txt`
+  - 可视化：`go tool pprof -http=:6060 cpu.prof`
+
+### 7.5.2 日志规范
+
+- **统一日志库**：全仓库使用 `log/slog`（Go 1.21+ 标准库结构化日志）
+- **输出格式**：默认 `TextHandler` 输出到 `stderr`
+- **安全要求**：**禁止把 NPSSO、access token、refresh token 等敏感凭证打进日志**
+- **结构化字段**：使用 `slog.String()`、`slog.Int()`、`slog.Duration()` 等附加上下文
+- **关键事件**：
+  - 启动与初始化（玩家加载数量、内存排行榜门槛分）
+  - WAL 封段与刷盘（批次大小、耗时、去重丢弃数）
+  - 热路径 vs 冷路径分流决策
+  - PSN API 调用失败（不记录响应体完整内容）
+  - 错误与异常（含栈信息，但不含敏感字段）
 
 ---
 
@@ -837,18 +867,20 @@ score > 门槛分？
    - 将当前正在写入的 `shard-N.log` **原子 rename** 为不可变段 `shard-N.log.sealed-<timestamp>`（例如 `shard-3.log.sealed-1726056896`）
    - 立即创建新的空 `shard-N.log` 文件供后续写入继续追加
    - **优点**：避免「先备份、再截断原文件」导致的数据窗口问题；rename 是原子操作，崩溃恢复简单
+   - **关键**：**Rename 与创建新文件必须在分片锁内完成（快速），封段后立即释放锁**
 
 2. **读取 sealed 段**：
-   - Worker 只读该段（此时已不可变，无写入竞争）
+   - **在锁外读取** sealed 段（此时已不可变，无写入竞争）
    - 同一 `online_id` 可能有多条事件（例如模拟灌数时重复更新）；**只保留 `event_ts` 最新的一条**（或用单调递增 `seq` 字段判断）
 
 3. **批量 Upsert SQLite**：
-   - 将去重后的事件批量 Upsert 到 SQLite（例如：`INSERT ... ON CONFLICT(online_id) DO UPDATE SET ...`）
+   - **在锁外执行**批量 Upsert 到 SQLite（例如：`INSERT ... ON CONFLICT(online_id) DO UPDATE SET ...`）
    - 使用事务减少 fsync 次数
 
 4. **更新内存与 Top1000**：
-   - Upsert 成功后，更新全量内存结构
+   - **在锁外更新**全量内存结构（或使用专用内存锁，避免阻塞 WAL 写入）
    - 重新计算 Top1000 视图与门槛分（可能有冷路径玩家因分数增长进入前 1000）
+   - **优化**：暴露 `memrank.UpsertBatch(players []Player)` + 单次 `Rebuild()`，避免「每玩家一次全量 SortAndNumber」
 
 5. **删除 sealed 段**：
    - **仅在 SQLite Upsert 成功后**，整文件删除 `shard-N.log.sealed-<timestamp>`
@@ -858,6 +890,13 @@ score > 门槛分？
    - 进程重启时，从 SQLite 重建全量内存与 Top1000
    - 扫描所有 `*.log.sealed-*` 文件（幂等重放）：去重后 Upsert SQLite，再更新内存
    - **禁止「先删 WAL 再写库」顺序**（会导致崩溃丢数据）；必须先写库、后删 WAL
+
+**锁优化关键**：
+
+- **持锁范围最小化**：分片锁 **只保护 rename + 创建新文件**（文件系统操作，毫秒级）
+- **长耗时操作在锁外**：读 sealed 段、解析 JSON、去重、批量 DB upsert、内存 rebuild 全部在锁外执行
+- **避免锁竞争卡住写入**：seed 1 万条时，若每次封段都持锁做「全量 memrank 重排」，会阻塞新写入数秒；改为批量 Upsert 后单次 rebuild
+- **内存更新隔离**：memrank 可使用独立的 RWMutex，与 WAL 分片锁分离
 
 **可观测性**：
 
