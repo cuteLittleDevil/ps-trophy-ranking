@@ -71,11 +71,17 @@ h1 {
     align-items: center;
     gap: 10px;
     flex: 1;
-    min-width: 280px;
+    min-width: 240px;
 }
 
 .join-form {
     flex: 2;
+    min-width: 320px;
+}
+
+.me-form {
+    flex: 0 0 auto;
+    min-width: 180px;
 }
 
 label {
@@ -289,6 +295,28 @@ footer {
 
 footer p {
     margin: 5px 0;
+}
+
+@media (max-width: 1500px) {
+    .actions {
+        gap: 15px;
+    }
+
+    .join-form {
+        flex: 1 1 100%;
+        min-width: 100%;
+    }
+
+    .search-form,
+    .me-form {
+        flex: 1 1 auto;
+        min-width: 220px;
+    }
+
+    .me-form {
+        flex: 0 1 auto;
+        min-width: 160px;
+    }
 }
 
 @media (max-width: 768px) {
