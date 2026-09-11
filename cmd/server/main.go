@@ -4,6 +4,7 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	_ "net/http/pprof" // 自动注册 /debug/pprof/ 路由
 	"os"
 	"path/filepath"
 
@@ -97,6 +98,7 @@ func main() {
 
 	log.Printf("Server listening on http://%s", cfg.ListenAddr)
 	log.Printf("Open http://%s in your browser", cfg.ListenAddr)
+	log.Printf("pprof enabled at http://%s/debug/pprof/ (local access only)", cfg.ListenAddr)
 
 	if err := http.ListenAndServe(cfg.ListenAddr, server.Handler()); err != nil {
 		log.Fatalf("server error: %v", err)
