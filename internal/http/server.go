@@ -202,10 +202,22 @@ func (s *Server) handleJoin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Reject negative trophy counts
+	if summary.Bronze < 0 || summary.Silver < 0 || summary.Gold < 0 || summary.Platinum < 0 {
+		s.renderError(w, "暂时无法同步奖杯，请稍后重试", onlineID)
+		return
+	}
+
+	// Validate avatar URL: only accept https or empty
+	avatarURL := summary.AvatarURL
+	if avatarURL != "" && !strings.HasPrefix(avatarURL, "https://") {
+		avatarURL = "" // Reject non-https schemes, use placeholder
+	}
+
 	p := player.Player{
 		OnlineID:  summary.OnlineID,
 		DisplayID: summary.DisplayID,
-		AvatarURL: summary.AvatarURL,
+		AvatarURL: avatarURL,
 		Bronze:    summary.Bronze,
 		Silver:    summary.Silver,
 		Gold:      summary.Gold,
@@ -258,6 +270,16 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		s.renderError(w, "该玩家尚未入榜", onlineID)
 		return
 	}
+
+	// Set cookie so "我的排名" works after search (US-007)
+	http.SetCookie(w, &http.Cookie{
+		Name:     cookieName,
+		Value:    url.QueryEscape(p.DisplayID),
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   cookieMaxAge,
+	})
 
 	targetPage := s.findPlayerPage(p.OnlineID)
 	redirectURL := fmt.Sprintf("/?page=%d&highlight=%s", targetPage, url.QueryEscape(p.OnlineID))
