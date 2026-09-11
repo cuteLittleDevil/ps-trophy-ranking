@@ -168,6 +168,7 @@ v1 对外是 HTML 页面和表单，不是 JSON API。
 |--------|------|-------------|------|---------|----------|
 | GET | `/` | 排行榜页 | 无 | `page`、`highlight` | 200 HTML |
 | POST | `/join` | 入榜或更新 | 无 | form `online_id` | 302 或 200 带错误 |
+| POST | `/refresh` | 刷新已入榜玩家奖杯 | 无 | form `online_id`、`page` | 302 或 200 带错误 |
 | GET | `/search` | 按 ID 查找 | 无 | query `online_id` | 302 或 200 带提示 |
 | GET | `/me` | 我的排名 | cookie | 无 | 302 或 200 带提示 |
 | GET | `/static/*` | CSS 等 | 无 | 无 | 静态文件 |
@@ -200,6 +201,14 @@ v1 对外是 HTML 页面和表单，不是 JSON API。
 
 - 无 cookie：200，「先入榜或先查找」
 - 有 cookie：按 `/search` 处理
+
+**POST `/refresh`**
+
+- `application/x-www-form-urlencoded`，字段 `online_id` 和 `page`
+- 必须已在榜：不在榜 → 200，「该玩家尚未入榜」
+- 与 `/join` 共享 15 分钟冷却：冷却期内 → 200，「同步过于频繁」
+- 成功：与 `/join` 相同的 PSN 同步逻辑，302 到 `/?page=<form-page>&highlight=<id>`
+- 模拟数据用户（`sim` 前缀）：排行榜 UI 不显示刷新按钮（无法调用 PSN API）
 
 ### 4.3 Error Responses
 
@@ -258,6 +267,14 @@ score = bronze*15 + silver*30 + gold*90 + platinum*300
 5. 已存在：更新 counts、score、avatar、display_id、synced_at，不改 joined_at
 6. 不存在：插入，joined_at=synced_at=now
 7. 设 cookie，302 到该 ID 所在页
+
+**刷新**（`/refresh`）
+
+1. 校验 Online ID 格式（复用入榜逻辑）
+2. 必须已在榜：不在榜 → 200 错误页「该玩家尚未入榜」
+3. 与 `/join` 共享 15 分钟冷却检查
+4. 成功后走与入榜相同的同步逻辑，302 到 `?page=<form-page>&highlight=<id>`
+5. UI：排行榜每行显示「刷新」按钮，`sim` 前缀用户不显示（无法调用 PSN API）
 
 **fixture 冷却**：关闭（每次提交都更新）。
 

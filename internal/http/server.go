@@ -90,6 +90,7 @@ func (s *Server) Handler() http.Handler {
 	// Routes
 	r.Get("/", s.handleHome)
 	r.Post("/join", s.handleJoin)
+	r.Post("/refresh", s.handleRefresh)
 	r.Get("/search", s.handleSearch)
 	r.Get("/me", s.handleMe)
 	r.Post("/admin/seed", s.handleAdminSeed)
@@ -264,6 +265,111 @@ func (s *Server) handleJoin(w http.ResponseWriter, r *http.Request) {
 
 	targetPage := s.findPlayerPage(summary.OnlineID)
 	redirectURL := fmt.Sprintf("/?page=%d&highlight=%s", targetPage, url.QueryEscape(summary.OnlineID))
+	http.Redirect(w, r, redirectURL, http.StatusSeeOther)
+}
+
+func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
+	onlineID := strings.TrimSpace(r.FormValue("online_id"))
+
+	if onlineID == "" {
+		s.renderError(w, "请输入 PSN Online ID", "")
+		return
+	}
+
+	if err := validateOnlineID(onlineID); err != nil {
+		s.renderError(w, err.Error(), onlineID)
+		return
+	}
+
+	// Check if player is on the leaderboard
+	existing, err := s.store.Get(onlineID)
+	if err != nil {
+		log.Printf("check existing player: %v", err)
+		s.renderError(w, "查找失败", onlineID)
+		return
+	}
+	if existing == nil {
+		s.renderError(w, "该玩家尚未入榜", onlineID)
+		return
+	}
+
+	// Check cooldown (15 minutes)
+	if time.Since(existing.SyncedAt) < 15*time.Minute {
+		s.renderError(w, "同步过于频繁", onlineID)
+		return
+	}
+
+	// Perform PSN lookup
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+
+	summary, err := s.source.Lookup(ctx, onlineID)
+	if err != nil {
+		msg := mapTrophyError(err)
+		s.renderError(w, msg, onlineID)
+		return
+	}
+
+	// Reject negative trophy counts
+	if summary.Bronze < 0 || summary.Silver < 0 || summary.Gold < 0 || summary.Platinum < 0 {
+		s.renderError(w, "暂时无法同步奖杯，请稍后重试", onlineID)
+		return
+	}
+
+	// Validate avatar URL: accept https, or http from Sony CDN
+	avatarURL := summary.AvatarURL
+	if avatarURL != "" {
+		if strings.HasPrefix(avatarURL, "http://") {
+			// Upgrade Sony CDN URLs from http to https
+			if strings.Contains(avatarURL, "static-resource.np.community.playstation.net") {
+				avatarURL = strings.Replace(avatarURL, "http://", "https://", 1)
+			} else {
+				// Reject other http URLs
+				avatarURL = ""
+			}
+		} else if !strings.HasPrefix(avatarURL, "https://") {
+			// Reject non-http(s) schemes
+			avatarURL = ""
+		}
+	}
+
+	// Upsert player (preserves joined_at)
+	p := player.Player{
+		OnlineID:  summary.OnlineID,
+		DisplayID: summary.DisplayID,
+		AvatarURL: avatarURL,
+		Bronze:    summary.Bronze,
+		Silver:    summary.Silver,
+		Gold:      summary.Gold,
+		Platinum:  summary.Platinum,
+		Score:     rank.Score(summary.Bronze, summary.Silver, summary.Gold, summary.Platinum),
+		SyncedAt:  time.Now(),
+	}
+
+	if err := s.store.Upsert(p); err != nil {
+		log.Printf("upsert player: %v", err)
+		s.renderError(w, "无法保存排行榜数据", onlineID)
+		return
+	}
+
+	// Set cookie
+	http.SetCookie(w, &http.Cookie{
+		Name:     cookieName,
+		Value:    url.QueryEscape(summary.DisplayID),
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   cookieMaxAge,
+	})
+
+	// Get current page from form data
+	page, _ := strconv.Atoi(r.FormValue("page"))
+	if page < 1 {
+		page = 1
+	}
+
+	// Redirect back to the same page with highlight
+	redirectURL := fmt.Sprintf("/?page=%d&highlight=%s", page, url.QueryEscape(summary.OnlineID))
 	http.Redirect(w, r, redirectURL, http.StatusSeeOther)
 }
 

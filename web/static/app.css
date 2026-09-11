@@ -251,6 +251,28 @@ tbody tr.is-you:hover {
     color: #00a8e8;
 }
 
+.action-col {
+    width: 80px;
+    text-align: center;
+}
+
+.refresh-btn {
+    padding: 6px 12px;
+    font-size: 0.85rem;
+    background: #10b981;
+    color: #fff;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-weight: 600;
+    transition: background 0.2s;
+    white-space: nowrap;
+}
+
+.refresh-btn:hover {
+    background: #059669;
+}
+
 .you-badge {
     display: inline-block;
     margin-left: 5px;
