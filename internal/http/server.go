@@ -350,8 +350,16 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Phase 1: 成功后立即更新内存 + Top1000
-	s.leaderboard.Upsert(p)
+	// Phase 1: 从 store 读取完整数据（含 JoinedAt）再更新内存
+	stored, err := s.store.Get(summary.OnlineID)
+	if err != nil {
+		log.Printf("get player after upsert: %v", err)
+		s.leaderboard.Upsert(p)
+	} else if stored != nil {
+		s.leaderboard.Upsert(*stored)
+	} else {
+		s.leaderboard.Upsert(p)
+	}
 
 	// Set cookie
 	http.SetCookie(w, &http.Cookie{
@@ -628,8 +636,16 @@ func (s *Server) handleAdminSeed(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		// Phase 1: 成功后立即更新内存 + Top1000
-		s.leaderboard.Upsert(p)
+		// Phase 1: 从 store 读取完整数据（含 JoinedAt）再更新内存
+		stored, err := s.store.Get(onlineID)
+		if err != nil {
+			log.Printf("get player after seed upsert: %v", err)
+			s.leaderboard.Upsert(p)
+		} else if stored != nil {
+			s.leaderboard.Upsert(*stored)
+		} else {
+			s.leaderboard.Upsert(p)
+		}
 
 		inserted++
 	}

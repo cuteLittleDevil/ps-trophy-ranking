@@ -88,7 +88,9 @@ func (lb *Leaderboard) Get(onlineID string) *rank.RankedPlayer {
 
 // Page 返回分页结果。
 // page 从 1 开始，pageSize 为每页大小（通常 50）。
-// 若 page 对应的名次范围在 Top1000 内，直接从 top1000 切片；否则从全量 ranked 切片。
+//
+// 优化策略：若请求区间完全在 Top1000 内（即 end <= min(1000, totalCount)），
+// 则从 top1000 视图读取；否则从全量 ranked 读取，确保不会因越界截断。
 func (lb *Leaderboard) Page(page, pageSize int) []rank.RankedPlayer {
 	lb.mu.RLock()
 	defer lb.mu.RUnlock()
@@ -97,30 +99,34 @@ func (lb *Leaderboard) Page(page, pageSize int) []rank.RankedPlayer {
 		page = 1
 	}
 	offset := (page - 1) * pageSize
+	end := offset + pageSize
 
-	// 判断是否可以用 Top1000 视图
-	// 若请求的起始名次 <= 1000 且 Top1000 非空，则用 top1000
-	if offset < 1000 && len(lb.top1000) > 0 {
-		if offset >= len(lb.top1000) {
+	totalCount := len(lb.ranked)
+	top1000Size := len(lb.top1000)
+
+	// 判断是否可以用 Top1000 视图：
+	// 条件：请求区间完全在 [0, min(1000, totalCount)) 内
+	useTop1000 := top1000Size > 0 && end <= top1000Size
+
+	if useTop1000 {
+		// 使用 Top1000 视图
+		if offset >= top1000Size {
 			return nil
 		}
-		end := offset + pageSize
-		if end > len(lb.top1000) {
-			end = len(lb.top1000)
+		if end > top1000Size {
+			end = top1000Size
 		}
-		// 返回副本，避免外部修改
 		result := make([]rank.RankedPlayer, end-offset)
 		copy(result, lb.top1000[offset:end])
 		return result
 	}
 
-	// 否则从全量 ranked 切片
-	if offset >= len(lb.ranked) {
+	// 使用全量 ranked
+	if offset >= totalCount {
 		return nil
 	}
-	end := offset + pageSize
-	if end > len(lb.ranked) {
-		end = len(lb.ranked)
+	if end > totalCount {
+		end = totalCount
 	}
 	result := make([]rank.RankedPlayer, end-offset)
 	copy(result, lb.ranked[offset:end])
