@@ -19,9 +19,9 @@
 
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
-| 语言与页面 | Go + 服务端 HTML 模板 | 仓库已是 Go 模块；本地演示不需要前端构建链 |
+| 语言与页面 | Go + 服务端 HTML 模板 | 仓库已是 Go 模块;本地演示不需要前端构建链 |
 | HTTP 客户端 | 已有 `github.com/go-resty/resty/v2` | `go.mod` 已引入，不新增同类库 |
-| Web 框架 | 标准库 `net/http` | v1 路由少，不引入 Web 框架 |
+| Web 框架 | go-chi/chi v5 | 轻量 HTTP 路由器，兼容 `net/http` Handler，路由少但更清晰 |
 | 持久化 | SQLite 文件 | 满足重启不丢数据；v1 不上 Redis / 消息队列 |
 | 名次 | 读取时计算，不存 rank 列 | 避免写入后 rank 脏数据 |
 | 真实 PSN | 服务端 NPSSO，非官方 trophy API | Sony 无个人可用的官方 OAuth |

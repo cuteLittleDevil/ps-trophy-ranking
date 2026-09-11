@@ -15,6 +15,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
 )
 
 const (
@@ -63,13 +66,19 @@ func New(store *player.Store, source trophy.Source, dataSource string, templates
 
 // Handler returns the HTTP handler.
 func (s *Server) Handler() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/", s.handleHome)
-	mux.HandleFunc("/join", s.handleJoin)
-	mux.HandleFunc("/search", s.handleSearch)
-	mux.HandleFunc("/me", s.handleMe)
-	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.FS(s.staticFS))))
-	return mux
+	r := chi.NewRouter()
+	
+	// Middleware
+	r.Use(middleware.Recoverer)
+	
+	// Routes
+	r.Get("/", s.handleHome)
+	r.Post("/join", s.handleJoin)
+	r.Get("/search", s.handleSearch)
+	r.Get("/me", s.handleMe)
+	r.Handle("/static/*", http.StripPrefix("/static/", http.FileServer(http.FS(s.staticFS))))
+	
+	return r
 }
 
 type pageData struct {
@@ -89,11 +98,6 @@ type rankedPlayerView struct {
 }
 
 func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" {
-		http.NotFound(w, r)
-		return
-	}
-
 	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
 	if page < 1 {
 		page = 1
@@ -163,11 +167,6 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleJoin(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
 	onlineID := strings.TrimSpace(r.FormValue("online_id"))
 
 	if onlineID == "" {
