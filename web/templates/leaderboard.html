@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PSN 奖杯排行榜</title>
+    <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>PSN 奖杯排行榜</h1>
+            <p class="subtitle">按奖杯积分排序的全球玩家排行</p>
+        </header>
+
+        {{if .Error}}
+        <div class="error-message">
+            {{.Error}}
+        </div>
+        {{end}}
+
+        {{if .InfoMessage}}
+        <div class="info-message">
+            {{.InfoMessage}}
+        </div>
+        {{end}}
+
+        <div class="actions">
+            <form method="POST" action="/join" class="join-form">
+                <label for="online_id">加入排行榜</label>
+                <input type="text" name="online_id" id="online_id" placeholder="输入 PSN Online ID" value="{{.InputID}}" required>
+                <button type="submit">入榜</button>
+            </form>
+
+            <form method="GET" action="/search" class="search-form">
+                <label for="search_id">查找玩家</label>
+                <input type="text" name="online_id" id="search_id" placeholder="PSN Online ID">
+                <button type="submit">查找</button>
+            </form>
+
+            <form method="GET" action="/me" class="me-form">
+                <button type="submit">我的排名</button>
+            </form>
+        </div>
+
+        {{if .Players}}
+        <div class="leaderboard">
+            <table>
+                <thead>
+                    <tr>
+                        <th class="rank-col">名次</th>
+                        <th class="avatar-col">头像</th>
+                        <th class="id-col">PSN ID</th>
+                        <th class="trophy-col platinum">白金</th>
+                        <th class="trophy-col gold">金</th>
+                        <th class="trophy-col silver">银</th>
+                        <th class="trophy-col bronze">铜</th>
+                        <th class="score-col">积分</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {{range .Players}}
+                    <tr{{if .IsYou}} class="is-you"{{end}}>
+                        <td class="rank-col">{{.Rank}}{{if .IsYou}}<span class="you-badge">你</span>{{end}}</td>
+                        <td class="avatar-col">
+                            <img src="{{if .AvatarURL}}{{.AvatarURL}}{{else}}/static/placeholder.png{{end}}" 
+                                 alt="{{.DisplayID}}" 
+                                 onerror="this.src='/static/placeholder.png'">
+                        </td>
+                        <td class="id-col">{{.DisplayID}}</td>
+                        <td class="trophy-col platinum">{{.Platinum}}</td>
+                        <td class="trophy-col gold">{{.Gold}}</td>
+                        <td class="trophy-col silver">{{.Silver}}</td>
+                        <td class="trophy-col bronze">{{.Bronze}}</td>
+                        <td class="score-col">{{.Score}}</td>
+                    </tr>
+                    {{end}}
+                </tbody>
+            </table>
+        </div>
+
+        {{if gt .TotalPages 1}}
+        <div class="pagination">
+            {{if gt .CurrentPage 1}}
+            <a href="/?page={{sub .CurrentPage 1}}">上一页</a>
+            {{end}}
+            
+            <span class="page-info">第 {{.CurrentPage}} 页 / 共 {{.TotalPages}} 页</span>
+            
+            {{if lt .CurrentPage .TotalPages}}
+            <a href="/?page={{add .CurrentPage 1}}">下一页</a>
+            {{end}}
+        </div>
+        {{end}}
+        {{else}}
+        <div class="empty-state">
+            {{if .EmptyMessage}}
+                {{.EmptyMessage}}
+            {{else}}
+                还没有玩家入榜
+            {{end}}
+        </div>
+        {{end}}
+
+        <footer>
+            <p>积分公式：铜×15 + 银×30 + 金×90 + 白金×300</p>
+            <p>数据源：{{.DataSource}}</p>
+        </footer>
+    </div>
+</body>
+</html>
