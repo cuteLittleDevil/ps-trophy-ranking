@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"ps-trophy-ranking/internal/memrank"
 	"ps-trophy-ranking/internal/player"
 	"ps-trophy-ranking/internal/rank"
 	"ps-trophy-ranking/internal/trophy"
@@ -37,12 +38,13 @@ var idPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 type Server struct {
 	store       *player.Store
 	source      trophy.Source
+	leaderboard *memrank.Leaderboard
 	tmpl        *template.Template
 	templatesFS fs.FS
 	staticFS    fs.FS
 }
 
-// New creates a new HTTP server.
+// New creates a new HTTP server and loads the initial leaderboard from store.
 func New(store *player.Store, source trophy.Source, templatesFS, staticFS fs.FS) (*Server, error) {
 	funcMap := template.FuncMap{
 		"add":        func(a, b int) int { return a + b },
@@ -71,9 +73,21 @@ func New(store *player.Store, source trophy.Source, templatesFS, staticFS fs.FS)
 		return nil, fmt.Errorf("parse templates: %w", err)
 	}
 
+	// 启动时从 SQLite 加载全量玩家到内存
+	leaderboard := memrank.New()
+	players, err := store.ListAll()
+	if err != nil {
+		return nil, fmt.Errorf("load initial leaderboard: %w", err)
+	}
+	log.Printf("Loading %d players into memory leaderboard", len(players))
+	leaderboard.Load(players)
+	log.Printf("Memory leaderboard initialized: %d players, threshold score: %d", 
+		leaderboard.Count(), leaderboard.ThresholdScore())
+
 	return &Server{
 		store:       store,
 		source:      source,
+		leaderboard: leaderboard,
 		tmpl:        tmpl,
 		templatesFS: templatesFS,
 		staticFS:    staticFS,
@@ -122,38 +136,16 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
 
 	highlight := strings.TrimSpace(r.URL.Query().Get("highlight"))
 
-	players, err := s.store.ListAll()
-	if err != nil {
-		log.Printf("list players: %v", err)
-		s.renderError(w, "无法加载排行榜", "")
-		return
-	}
-
-	if len(players) == 0 {
+	// Phase 1: 从内存读取，不再每次 ListAll + SortAndNumber
+	count := s.leaderboard.Count()
+	if count == 0 {
 		s.render(w, pageData{
 			EmptyMessage: "还没有玩家入榜",
 		})
 		return
 	}
 
-	rankPlayers := make([]rank.Player, len(players))
-	for i, p := range players {
-		rankPlayers[i] = rank.Player{
-			OnlineID:  p.OnlineID,
-			DisplayID: p.DisplayID,
-			AvatarURL: p.AvatarURL,
-			Counts: rank.Counts{
-				Bronze:   p.Bronze,
-				Silver:   p.Silver,
-				Gold:     p.Gold,
-				Platinum: p.Platinum,
-			},
-			Score: p.Score,
-		}
-	}
-
-	ranked := rank.SortAndNumber(rankPlayers)
-	totalPages := rank.TotalPages(len(ranked), pageSize)
+	totalPages := s.leaderboard.TotalPages(pageSize)
 
 	if page > totalPages && totalPages > 0 {
 		s.render(w, pageData{
@@ -164,7 +156,8 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	paged := rank.Page(ranked, page, pageSize)
+	// 从内存分页（Top1000 或全量）
+	paged := s.leaderboard.Page(page, pageSize)
 	views := make([]rankedPlayerView, len(paged))
 	for i, p := range paged {
 		views[i] = rankedPlayerView{
@@ -248,11 +241,15 @@ func (s *Server) handleJoin(w http.ResponseWriter, r *http.Request) {
 		SyncedAt:  time.Now(),
 	}
 
+	// Phase 1: 同步 Upsert SQLite
 	if err := s.store.Upsert(p); err != nil {
 		log.Printf("upsert player: %v", err)
 		s.renderError(w, "无法保存排行榜数据", onlineID)
 		return
 	}
+
+	// Phase 1: 成功后立即更新内存 + Top1000
+	s.leaderboard.Upsert(p)
 
 	http.SetCookie(w, &http.Cookie{
 		Name:     cookieName,
@@ -346,11 +343,15 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		SyncedAt:  time.Now(),
 	}
 
+	// Phase 1: 同步 Upsert SQLite
 	if err := s.store.Upsert(p); err != nil {
 		log.Printf("upsert player: %v", err)
 		s.renderError(w, "无法保存排行榜数据", onlineID)
 		return
 	}
+
+	// Phase 1: 成功后立即更新内存 + Top1000
+	s.leaderboard.Upsert(p)
 
 	// Set cookie
 	http.SetCookie(w, &http.Cookie{
@@ -386,13 +387,8 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	p, err := s.store.Get(onlineID)
-	if err != nil {
-		log.Printf("get player: %v", err)
-		s.renderError(w, "查找失败", onlineID)
-		return
-	}
-
+	// Phase 1: 从内存查找
+	p := s.leaderboard.Get(onlineID)
 	if p == nil {
 		s.renderError(w, "该玩家尚未入榜", onlineID)
 		return
@@ -428,13 +424,8 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	p, err := s.store.Get(onlineID)
-	if err != nil {
-		log.Printf("get player: %v", err)
-		s.renderError(w, "查找失败", "")
-		return
-	}
-
+	// Phase 1: 从内存查找
+	p := s.leaderboard.Get(onlineID)
 	if p == nil {
 		s.renderError(w, "该玩家尚未入榜", "")
 		return
@@ -446,34 +437,14 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) findPlayerPage(onlineID string) int {
-	players, err := s.store.ListAll()
-	if err != nil {
+	// Phase 1: 从内存查找玩家并计算页码
+	p := s.leaderboard.Get(onlineID)
+	if p == nil {
 		return 1
 	}
-
-	rankPlayers := make([]rank.Player, len(players))
-	for i, p := range players {
-		rankPlayers[i] = rank.Player{
-			OnlineID:  p.OnlineID,
-			DisplayID: p.DisplayID,
-			AvatarURL: p.AvatarURL,
-			Counts: rank.Counts{
-				Bronze:   p.Bronze,
-				Silver:   p.Silver,
-				Gold:     p.Gold,
-				Platinum: p.Platinum,
-			},
-			Score: p.Score,
-		}
-	}
-
-	ranked := rank.SortAndNumber(rankPlayers)
-	for i, p := range ranked {
-		if strings.EqualFold(p.OnlineID, onlineID) {
-			return (i / pageSize) + 1
-		}
-	}
-	return 1
+	// rank 是 1-based，页码也是 1-based
+	// 第 1-50 名在第 1 页，第 51-100 名在第 2 页
+	return ((p.Rank - 1) / pageSize) + 1
 }
 
 func validateOnlineID(id string) error {
@@ -515,30 +486,14 @@ func (s *Server) render(w http.ResponseWriter, data pageData) {
 }
 
 func (s *Server) renderError(w http.ResponseWriter, errMsg, inputID string) {
-	players, _ := s.store.ListAll()
-	
+	// Phase 1: 从内存读取第一页，用于错误页面仍显示榜单
 	var views []rankedPlayerView
 	var currentPage, totalPages int
 	
-	if len(players) > 0 {
-		rankPlayers := make([]rank.Player, len(players))
-		for i, p := range players {
-			rankPlayers[i] = rank.Player{
-				OnlineID:  p.OnlineID,
-				DisplayID: p.DisplayID,
-				AvatarURL: p.AvatarURL,
-				Counts: rank.Counts{
-					Bronze:   p.Bronze,
-					Silver:   p.Silver,
-					Gold:     p.Gold,
-					Platinum: p.Platinum,
-				},
-				Score: p.Score,
-			}
-		}
-		ranked := rank.SortAndNumber(rankPlayers)
-		totalPages = rank.TotalPages(len(ranked), pageSize)
-		paged := rank.Page(ranked, 1, pageSize)
+	count := s.leaderboard.Count()
+	if count > 0 {
+		totalPages = s.leaderboard.TotalPages(pageSize)
+		paged := s.leaderboard.Page(1, pageSize)
 		views = make([]rankedPlayerView, len(paged))
 		for i, p := range paged {
 			views[i] = rankedPlayerView{RankedPlayer: p}
@@ -666,11 +621,15 @@ func (s *Server) handleAdminSeed(w http.ResponseWriter, r *http.Request) {
 			SyncedAt:  time.Now(),
 		}
 
+		// Phase 1: 同步 Upsert SQLite
 		if err := s.store.Upsert(p); err != nil {
 			log.Printf("seed upsert: %v", err)
 			failed++
 			continue
 		}
+
+		// Phase 1: 成功后立即更新内存 + Top1000
+		s.leaderboard.Upsert(p)
 
 		inserted++
 	}
@@ -718,4 +677,14 @@ func isLoopback(remoteAddr string) bool {
 	}
 
 	return false
+}
+
+// ReloadFromStore 从 store 重新加载全量数据到内存（测试辅助方法）。
+func (s *Server) ReloadFromStore() error {
+	players, err := s.store.ListAll()
+	if err != nil {
+		return err
+	}
+	s.leaderboard.Load(players)
+	return nil
 }

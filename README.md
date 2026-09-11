@@ -191,7 +191,11 @@ go build ./cmd/server
 
 ## 架构
 
-### v1 当前架构（已落地）
+**当前状态：Phase 1（内存排行榜）**
+
+v1 已演进至 §13.8 Phase 1：启动时从 SQLite 加载全量玩家到内存，维护 Top1000 视图与门槛分。所有读取（分页、查找、我的排名）从内存完成；所有写入（入榜、刷新、seed）同步 Upsert SQLite 后更新内存。**稳态读不再每次 `ListAll` + 全量重排**，提升读路径性能。
+
+Phase 2（双路径 WAL 分片写入）待实现。
 
 ```
 cmd/
@@ -200,6 +204,7 @@ cmd/
 internal/
   config/         - 环境变量配置
   http/           - HTTP 路由与模板渲染
+  memrank/        - Phase 1: 全量内存排行榜 + Top1000 视图
   player/         - SQLite 持久化
   psn/            - Sony 非官方 API 客户端
   rank/           - 积分、排序、竞赛名次、分页
@@ -208,90 +213,6 @@ web/
   templates/      - HTML 模板
   static/         - CSS 和占位图
 ```
-
-**当前行为**：同步 SQLite Upsert + 每次读取全量排序。适合本地演示与低频访问（个位数并发）。
-
-### 高吞吐写入演进架构（已批准，待实现）
-
-**目标**：支撑约**每秒 1 万次**模拟推送/灌数级更新，继续使用 SQLite，秒级可见。
-
-**核心设计**：
-
-- **全量内存 + Top1000 视图**：启动时从 SQLite 加载所有玩家到内存；额外维护前 1000 名独立视图优化常见查询
-- **双路径写入**：
-  - **热路径**（分数高于第 1000 名）：实时 Upsert SQLite + 更新内存，立即可见
-  - **冷路径**（分数 ≤ 门槛）：追加到 10 个 WAL 分片文件，定期封段刷盘（约 100ms）
-- **奖杯只增**：PSN 奖杯只会增加，设计不处理分数下降
-- **崩溃恢复**：WAL 封段 rename 协议，重启时重放未处理段
-
-详细设计见 `tasks/spec-psn-trophy-leaderboard.md` 第 13 节。
-
-#### 写入流程（推送/seed/冲榜）
-
-```mermaid
-flowchart TD
-    Start([新的玩家更新]) --> Validate[校验 Online ID]
-    Validate --> CalcScore[计算积分<br/>bronze×15+silver×30+gold×90+platinum×300]
-    CalcScore --> CheckThreshold{分数 > 第1000名门槛?<br/>或总数 < 1000?}
-    
-    CheckThreshold -->|是| HotPath[热路径：实时写入]
-    HotPath --> UpdateSQLite[立即 Upsert SQLite]
-    UpdateSQLite --> UpdateMemory[更新全量内存结构]
-    UpdateMemory --> UpdateTop1000[重新计算 Top1000 视图与门槛分]
-    UpdateTop1000 --> HotEnd([立即可见，返回成功])
-    
-    CheckThreshold -->|否| ColdPath[冷路径：WAL 追加]
-    ColdPath --> HashShard[按 online_id hash 分配到<br/>10 个分片之一]
-    HashShard --> AppendWAL[追加事件到 shard-N.log]
-    AppendWAL --> ColdReturn([返回成功])
-    
-    AppendWAL -.->|并行定时约100ms| SealWorker[封段 Worker]
-    SealWorker --> Rename[Rename shard-N.log<br/>→ shard-N.log.sealed-ts]
-    Rename --> CreateNew[创建新的空 shard-N.log]
-    CreateNew --> ReadSealed[读取 sealed 段]
-    ReadSealed --> Dedup[同 ID 去重<br/>保留最新 event_ts]
-    Dedup --> BatchUpsert[批量 Upsert SQLite]
-    BatchUpsert --> UpdateMemCold[更新全量内存与 Top1000]
-    UpdateMemCold --> DeleteSealed[删除 sealed 段文件]
-    DeleteSealed --> WaitNext[等待下次封段]
-    WaitNext -.-> SealWorker
-    
-    style HotPath fill:#ff6b6b
-    style ColdPath fill:#4ecdc4
-    style SealWorker fill:#ffe66d
-```
-
-#### 查询排行榜流程
-
-```mermaid
-flowchart TD
-    Start([GET / ?page=N]) --> CalcRange[计算名次范围<br/>start=(N-1)×50+1<br/>end=N×50]
-    CalcRange --> CheckTop{名次范围 ≤ 1000?}
-    
-    CheckTop -->|是| ReadTop1000[读 Top1000 内存视图]
-    ReadTop1000 --> Slice1[切片对应页数据]
-    
-    CheckTop -->|否| ReadFull[读全量内存排序结构]
-    ReadFull --> Slice2[切片对应页数据]
-    
-    Slice1 --> ApplyRank[应用竞赛名次规则<br/>同分同名次，随后跳号]
-    Slice2 --> ApplyRank
-    
-    ApplyRank --> RenderHTML([渲染 HTML 页面])
-    
-    Note1[注：SQLite 仅用于<br/>启动加载与持久化<br/>稳态读不访问数据库] -.-> ReadTop1000
-    Note1 -.-> ReadFull
-    
-    style ReadTop1000 fill:#95e1d3
-    style ReadFull fill:#f3a683
-    style Note1 fill:#dfe4ea,stroke:#dfe4ea
-```
-
-**关键点**：
-
-- 常见查询（前 20 页，名次 1-1000）走 Top1000 视图，无需扫描全量
-- 稳态读取**不访问 SQLite**，全在内存完成
-- SQLite 仅用于启动时加载数据与持久化写入
 
 ## 依赖
 
