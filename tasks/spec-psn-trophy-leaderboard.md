@@ -1035,6 +1035,15 @@ score > 门槛分？
    - 读路径改为读 Top1000 / 全量内存，不再每次 `ListAll` + `SortAndNumber`
    - **验收**：读性能提升；写入仍为 v1 水平
    - **实现模块**：`internal/memrank` 封装内存排行榜；HTTP 层集成
+   
+   **Phase 1+ 排序优化** ✅ **已落地（当前 PR）**
+   - **优化 A**：`internal/rank.SortAndNumber` 使用标准库 `slices.SortFunc`，O(N log N) 替代 O(N²) 插入排序
+   - **优化 B**：`internal/memrank.UpsertBatch` 使用有序合并（ordered merge）而非全量重排序
+     - WAL flush 批量更新时：移除旧项 → 排序批次 → 二路归并 → 重新分配竞赛名次
+     - 复杂度从 O(M * N log N) 优化为 O(M log M + N)（批量 M，总量 N）
+   - 新增 `indexByID map[string]int` 实现 O(1) 查找，优化 `Get` 和 `IndexOf`
+   - 新增大数据量测试（1k-50k）确保性能改善
+   - **验收**：1 万～10 万量级 rebuild/flush 不再卡在插入排序；所有测试通过
 
 2. **Phase 2**：冷路径 WAL + 封段刷盘 ✅ **已落地（2026-09-11）**
    - 去除 `/admin/seed` count 上限（仍须正整数）

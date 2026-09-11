@@ -1,6 +1,10 @@
 package rank
 
-import "strings"
+import (
+	"cmp"
+	"slices"
+	"strings"
+)
 
 // Score is Sony's published trophy point formula (bronze 15, silver 30, gold 90, platinum 300).
 // This is the canonical score calculation for ranking.
@@ -39,14 +43,8 @@ func SortAndNumber(players []Player) []RankedPlayer {
 	sorted := make([]Player, len(players))
 	copy(sorted, players)
 
-	// Insertion sort for clarity; v1 data volume is small.
-	for i := 1; i < len(sorted); i++ {
-		j := i
-		for j > 0 && less(sorted[j], sorted[j-1]) {
-			sorted[j], sorted[j-1] = sorted[j-1], sorted[j]
-			j--
-		}
-	}
+	// Use standard library sort for O(N log N) performance.
+	slices.SortFunc(sorted, comparePlayers)
 
 	ranked := make([]RankedPlayer, len(sorted))
 	for i, p := range sorted {
@@ -59,24 +57,39 @@ func SortAndNumber(players []Player) []RankedPlayer {
 	return ranked
 }
 
+// comparePlayers defines the sort order for slices.SortFunc.
+// Returns -1 if a < b, 0 if a == b, 1 if a > b.
+// Sort keys (descending): score, platinum, gold, silver, bronze.
+// Tiebreaker (ascending): online_id (case-insensitive).
+func comparePlayers(a, b Player) int {
+	// Higher score comes first (descending)
+	if c := cmp.Compare(b.Score, a.Score); c != 0 {
+		return c
+	}
+	// Higher platinum comes first (descending)
+	if c := cmp.Compare(b.Platinum, a.Platinum); c != 0 {
+		return c
+	}
+	// Higher gold comes first (descending)
+	if c := cmp.Compare(b.Gold, a.Gold); c != 0 {
+		return c
+	}
+	// Higher silver comes first (descending)
+	if c := cmp.Compare(b.Silver, a.Silver); c != 0 {
+		return c
+	}
+	// Higher bronze comes first (descending)
+	if c := cmp.Compare(b.Bronze, a.Bronze); c != 0 {
+		return c
+	}
+	// Lower online_id comes first (ascending, case-insensitive)
+	return cmp.Compare(strings.ToLower(a.OnlineID), strings.ToLower(b.OnlineID))
+}
+
 // less returns true if a should come before b in the leaderboard.
+// Kept for compatibility and internal use.
 func less(a, b Player) bool {
-	if a.Score != b.Score {
-		return a.Score > b.Score
-	}
-	if a.Platinum != b.Platinum {
-		return a.Platinum > b.Platinum
-	}
-	if a.Gold != b.Gold {
-		return a.Gold > b.Gold
-	}
-	if a.Silver != b.Silver {
-		return a.Silver > b.Silver
-	}
-	if a.Bronze != b.Bronze {
-		return a.Bronze > b.Bronze
-	}
-	return strings.ToLower(a.OnlineID) < strings.ToLower(b.OnlineID)
+	return comparePlayers(a, b) < 0
 }
 
 // sameRank returns true if two players have identical trophy counts and scores.

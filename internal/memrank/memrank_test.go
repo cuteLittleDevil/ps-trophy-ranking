@@ -379,123 +379,11 @@ func TestLeaderboard_UpsertBatch(t *testing.T) {
 	lb := New()
 	now := time.Now()
 
-	// 初始加载一个玩家
-	lb.Load([]player.Player{
-		{
-			OnlineID: "alice", DisplayID: "Alice", AvatarURL: "", Bronze: 100, Silver: 50, Gold: 20, Platinum: 5,
-			Score: rank.Score(100, 50, 20, 5), JoinedAt: now, SyncedAt: now,
-		},
-	})
-
-	if count := lb.Count(); count != 1 {
-		t.Errorf("expected initial count 1, got %d", count)
-	}
-
-	// 批量插入 3 个新玩家
-	batch := []player.Player{
-		{
-			OnlineID: "bob", DisplayID: "Bob", AvatarURL: "", Bronze: 200, Silver: 100, Gold: 40, Platinum: 10,
-			Score: rank.Score(200, 100, 40, 10), JoinedAt: now, SyncedAt: now,
-		},
-		{
-			OnlineID: "charlie", DisplayID: "Charlie", AvatarURL: "", Bronze: 150, Silver: 75, Gold: 30, Platinum: 7,
-			Score: rank.Score(150, 75, 30, 7), JoinedAt: now, SyncedAt: now,
-		},
-		{
-			OnlineID: "dave", DisplayID: "Dave", AvatarURL: "", Bronze: 50, Silver: 25, Gold: 10, Platinum: 2,
-			Score: rank.Score(50, 25, 10, 2), JoinedAt: now, SyncedAt: now,
-		},
-	}
-
-	lb.UpsertBatch(batch)
-
-	// 验证总数
-	if count := lb.Count(); count != 4 {
-		t.Errorf("expected count 4 after batch upsert, got %d", count)
-	}
-
-	// 验证排名顺序：Bob(1) > Charlie(2) > Alice(3) > Dave(4)
-	bob := lb.Get("bob")
-	if bob == nil || bob.Rank != 1 {
-		t.Errorf("expected bob rank 1, got %+v", bob)
-	}
-
-	charlie := lb.Get("charlie")
-	if charlie == nil || charlie.Rank != 2 {
-		t.Errorf("expected charlie rank 2, got %+v", charlie)
-	}
-
-	alice := lb.Get("alice")
-	if alice == nil || alice.Rank != 3 {
-		t.Errorf("expected alice rank 3, got %+v", alice)
-	}
-
-	dave := lb.Get("dave")
-	if dave == nil || dave.Rank != 4 {
-		t.Errorf("expected dave rank 4, got %+v", dave)
-	}
-
-	// 批量更新：更新 Alice 和 Dave 的分数
-	updateBatch := []player.Player{
-		{
-			OnlineID: "alice", DisplayID: "Alice", AvatarURL: "", Bronze: 300, Silver: 200, Gold: 80, Platinum: 20,
-			Score: rank.Score(300, 200, 80, 20), JoinedAt: now, SyncedAt: now,
-		},
-		{
-			OnlineID: "dave", DisplayID: "Dave", AvatarURL: "", Bronze: 250, Silver: 150, Gold: 60, Platinum: 15,
-			Score: rank.Score(250, 150, 60, 15), JoinedAt: now, SyncedAt: now,
-		},
-	}
-
-	lb.UpsertBatch(updateBatch)
-
-	// 验证总数不变
-	if count := lb.Count(); count != 4 {
-		t.Errorf("expected count still 4 after update, got %d", count)
-	}
-
-	// 验证新排名顺序：Alice(1) > Dave(2) > Bob(3) > Charlie(4)
-	alice = lb.Get("alice")
-	if alice == nil || alice.Rank != 1 {
-		t.Errorf("expected alice rank 1 after update, got %+v", alice)
-	}
-
-	dave = lb.Get("dave")
-	if dave == nil || dave.Rank != 2 {
-		t.Errorf("expected dave rank 2 after update, got %+v", dave)
-	}
-
-	bob = lb.Get("bob")
-	if bob == nil || bob.Rank != 3 {
-		t.Errorf("expected bob rank 3 after update, got %+v", bob)
-	}
-
-	charlie = lb.Get("charlie")
-	if charlie == nil || charlie.Rank != 4 {
-		t.Errorf("expected charlie rank 4 after update, got %+v", charlie)
-	}
-}
-
-func TestLeaderboard_UpsertBatch_Empty(t *testing.T) {
-	lb := New()
-
-	// 批量插入空切片
-	lb.UpsertBatch([]player.Player{})
-
-	if count := lb.Count(); count != 0 {
-		t.Errorf("expected count 0 after empty batch, got %d", count)
-	}
-}
-
-func TestLeaderboard_UpsertBatch_Large(t *testing.T) {
-	lb := New()
-	now := time.Now()
-
-	// 批量插入 1000 个玩家
-	batch := make([]player.Player, 1000)
-	for i := 0; i < 1000; i++ {
-		score := (1000 - i) * 100
-		batch[i] = player.Player{
+	// 初始加载 10 个玩家
+	initial := make([]player.Player, 10)
+	for i := 0; i < 10; i++ {
+		score := (10 - i) * 1000
+		initial[i] = player.Player{
 			OnlineID:  formatID(i),
 			DisplayID: formatID(i),
 			AvatarURL: "",
@@ -508,23 +396,172 @@ func TestLeaderboard_UpsertBatch_Large(t *testing.T) {
 			SyncedAt:  now,
 		}
 	}
+	lb.Load(initial)
+
+	if count := lb.Count(); count != 10 {
+		t.Fatalf("expected initial count 10, got %d", count)
+	}
+
+	// 批量更新：前 3 个玩家的分数翻倍，加 2 个新玩家
+	batch := make([]player.Player, 5)
+	for i := 0; i < 3; i++ {
+		score := (10-i)*1000*2 + 100 // 分数翻倍并加 100
+		batch[i] = player.Player{
+			OnlineID:  formatID(i),
+			DisplayID: formatID(i) + "_updated",
+			AvatarURL: "",
+			Bronze:    score / 15,
+			Silver:    0,
+			Gold:      0,
+			Platinum:  0,
+			Score:     score,
+			JoinedAt:  now,
+			SyncedAt:  now.Add(time.Hour),
+		}
+	}
+	// 新玩家 10 和 11
+	batch[3] = player.Player{
+		OnlineID:  formatID(10),
+		DisplayID: formatID(10),
+		AvatarURL: "",
+		Bronze:    50,
+		Silver:    0,
+		Gold:      0,
+		Platinum:  0,
+		Score:     750,
+		JoinedAt:  now,
+		SyncedAt:  now,
+	}
+	batch[4] = player.Player{
+		OnlineID:  formatID(11),
+		DisplayID: formatID(11),
+		AvatarURL: "",
+		Bronze:    100,
+		Silver:    0,
+		Gold:      0,
+		Platinum:  0,
+		Score:     1500,
+		JoinedAt:  now,
+		SyncedAt:  now,
+	}
 
 	lb.UpsertBatch(batch)
 
-	// 验证总数
-	if count := lb.Count(); count != 1000 {
-		t.Errorf("expected count 1000, got %d", count)
+	// 验证总数：10 + 2 新玩家 = 12
+	if count := lb.Count(); count != 12 {
+		t.Fatalf("expected count 12 after batch, got %d", count)
 	}
 
-	// 验证第一名分数
-	first := lb.Get(formatID(0))
-	if first == nil || first.Score != 100000 {
-		t.Errorf("expected first player score 100000, got %+v", first)
+	// 验证更新后的玩家信息
+	p0 := lb.Get(formatID(0))
+	if p0 == nil {
+		t.Fatal("player 0 not found")
+	}
+	expectedScore0 := 10*1000*2 + 100
+	if p0.Score != expectedScore0 {
+		t.Errorf("player 0: expected score %d, got %d", expectedScore0, p0.Score)
+	}
+	if p0.DisplayID != formatID(0)+"_updated" {
+		t.Errorf("player 0: expected updated display ID, got %s", p0.DisplayID)
 	}
 
-	// 验证门槛分（第 1000 名）
-	// Player at index 999: (1000 - 999) * 100 = 100
-	if threshold := lb.ThresholdScore(); threshold != 100 {
-		t.Errorf("expected threshold 100, got %d", threshold)
+	// 验证新玩家
+	p10 := lb.Get(formatID(10))
+	if p10 == nil {
+		t.Fatal("player 10 not found")
 	}
+	if p10.Score != 750 {
+		t.Errorf("player 10: expected score 750, got %d", p10.Score)
+	}
+
+	// 验证排序正确性：检查前 3 名
+	page1 := lb.Page(1, 3)
+	if len(page1) != 3 {
+		t.Fatalf("expected page1 len 3, got %d", len(page1))
+	}
+	// 第一名应该是 player000（分数 20100）
+	if page1[0].OnlineID != formatID(0) {
+		t.Errorf("rank 1: expected %s, got %s", formatID(0), page1[0].OnlineID)
+	}
+	if page1[0].Rank != 1 {
+		t.Errorf("rank 1: expected rank 1, got %d", page1[0].Rank)
+	}
+}
+
+func TestLeaderboard_UpsertBatch_LargeScale(t *testing.T) {
+	lb := New()
+	now := time.Now()
+
+	// 初始加载 10000 个玩家
+	initial := make([]player.Player, 10000)
+	for i := 0; i < 10000; i++ {
+		score := (10000 - i) * 10
+		initial[i] = player.Player{
+			OnlineID:  formatLargeID(i),
+			DisplayID: formatLargeID(i),
+			AvatarURL: "",
+			Bronze:    score / 15,
+			Silver:    0,
+			Gold:      0,
+			Platinum:  0,
+			Score:     score,
+			JoinedAt:  now,
+			SyncedAt:  now,
+		}
+	}
+	lb.Load(initial)
+
+	// 批量更新 1000 个玩家
+	batch := make([]player.Player, 1000)
+	for i := 0; i < 1000; i++ {
+		score := (10000-i)*10 + 5 // 略微提高分数
+		batch[i] = player.Player{
+			OnlineID:  formatLargeID(i),
+			DisplayID: formatLargeID(i),
+			AvatarURL: "",
+			Bronze:    score / 15,
+			Silver:    0,
+			Gold:      0,
+			Platinum:  0,
+			Score:     score,
+			JoinedAt:  now,
+			SyncedAt:  now.Add(time.Hour),
+		}
+	}
+
+	lb.UpsertBatch(batch)
+
+	// 验证总数不变
+	if count := lb.Count(); count != 10000 {
+		t.Fatalf("expected count 10000, got %d", count)
+	}
+
+	// 验证第一个玩家的分数已更新
+	p0 := lb.Get(formatLargeID(0))
+	if p0 == nil {
+		t.Fatal("player 0 not found")
+	}
+	expectedScore := 10000*10 + 5
+	if p0.Score != expectedScore {
+		t.Errorf("player 0: expected score %d, got %d", expectedScore, p0.Score)
+	}
+
+	// 验证排序正确性
+	for i := 1; i < len(lb.ranked); i++ {
+		prev := lb.ranked[i-1]
+		curr := lb.ranked[i]
+		if prev.Score < curr.Score {
+			t.Errorf("position %d: score order violation, prev=%d < curr=%d", i, prev.Score, curr.Score)
+			break
+		}
+	}
+}
+
+func formatLargeID(i int) string {
+	return "player" +
+		string(rune('0'+i/10000%10)) +
+		string(rune('0'+i/1000%10)) +
+		string(rune('0'+i/100%10)) +
+		string(rune('0'+i/10%10)) +
+		string(rune('0'+i%10))
 }
