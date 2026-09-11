@@ -475,6 +475,32 @@ v1 本地演示：个位数并发、最多数百行。**万级并发写入与秒
 
 ## 10. Implementation Status
 
+### 10.1 当前状态：Phase 1（内存排行榜）
+
+**最新落地**：2026-09-11 PR #12 实现 §13.8 **Phase 1**（全量内存 + Top1000 视图）
+
+- ✅ 启动时从 SQLite `ListAll` 加载全量玩家到内存
+- ✅ 维护有序 `ranked` 列表与 **Top1000 视图**
+- ✅ 计算门槛分（第 1000 名 score；不足 1000 人时为 −1）
+- ✅ 所有**写入**（`/join`、`/refresh`、`/admin/seed`）：同步 Upsert SQLite 后立即更新内存 + Top1000
+- ✅ 所有**读取**（`GET /`、`/search`、`/me`）：从内存读取，不再每次 `ListAll` + `SortAndNumber`
+- ✅ 分页逻辑：名次 ≤1000 走 Top1000 视图；之外走全量有序结构
+- ✅ 测试覆盖：内存加载、upsert 后可读、Top1000 切片、search/me 从内存查找
+
+**Phase 1 行为**：
+
+- 读路径性能提升（无需每次全量 SQL 查询与排序）
+- 写路径仍为 v1 行为（同步 SQLite，适合真实 PSN 低频入榜）
+- 无 WAL 文件；Phase 2 才引入双路径写入与封段刷盘
+
+**未实现（Phase 2+）**：
+
+- WAL 分片、封段、冷热分流写入（§13.3.2）
+- Prometheus metrics、反压（§13.7）
+- 热路径 micro-batch（§13.8 Phase 4）
+
+### 10.2 v1 基线回顾
+
 v1 已在 main 交付（PR #4–#10，见 `提交历史说明.md`）。实现顺序回顾：
 
 1. `rank` 纯函数 + 测试
@@ -957,25 +983,26 @@ score > 门槛分？
 
 本设计文档不涵盖实现细节；以下为建议实现拆分（供后续实施 PR 参考）：
 
-1. **Phase 1**：全量内存 + Top1000 视图（无 WAL）
+1. **Phase 1**：全量内存 + Top1000 视图（无 WAL）✅ **已落地（2026-09-11 PR #12）**
    - 启动时加载 SQLite 到内存；维护 Top1000
    - 所有写入仍同步 Upsert SQLite + 更新内存
    - 读路径改为读 Top1000 / 全量内存，不再每次 `ListAll` + `SortAndNumber`
    - **验收**：读性能提升；写入仍为 v1 水平
+   - **实现模块**：`internal/memrank` 封装内存排行榜；HTTP 层集成
 
-2. **Phase 2**：冷路径 WAL + 封段刷盘
+2. **Phase 2**：冷路径 WAL + 封段刷盘（待实现）
    - 增加双路径判断（门槛分）
    - 冷路径追加 WAL 分片；封段 Worker
    - 热路径仍同步 Upsert
    - **验收**：`/admin/seed` 高并发灌数达 1w/s；可见延迟 ≤1s
 
-3. **Phase 3**：崩溃恢复 + 可观测
+3. **Phase 3**：崩溃恢复 + 可观测（待实现）
    - 启动重放 sealed 段
    - 暴露 Prometheus metrics
    - 增加反压与告警
    - **验收**：重启后数据完整；监控面板可用
 
-4. **Phase 4（可选 follow-up）**：热路径 micro-batch
+4. **Phase 4（可选 follow-up）**：热路径 micro-batch（待实现）
    - 若观测到热路径仍有冲击，增加 10ms 窗口聚合
    - **验收**：热路径 QPS 进一步提升
 

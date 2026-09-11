@@ -150,6 +150,10 @@ func TestSearchFound(t *testing.T) {
 	if err := store.Upsert(p); err != nil {
 		t.Fatalf("upsert: %v", err)
 	}
+	// Phase 1: 测试中直接写 store 后需要重新加载内存
+	if err := server.ReloadFromStore(); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
 
 	req := httptest.NewRequest("GET", "/search?online_id=testuser", nil)
 	w := httptest.NewRecorder()
@@ -225,6 +229,10 @@ func TestMeWithCookie(t *testing.T) {
 	}
 	if err := store.Upsert(p); err != nil {
 		t.Fatalf("upsert: %v", err)
+	}
+	// Phase 1: 测试中直接写 store 后需要重新加载内存
+	if err := server.ReloadFromStore(); err != nil {
+		t.Fatalf("reload: %v", err)
 	}
 
 	req := httptest.NewRequest("GET", "/me", nil)
@@ -372,6 +380,11 @@ func TestPagination(t *testing.T) {
 		if err := store.Upsert(p); err != nil {
 			t.Fatalf("upsert %d: %v", i, err)
 		}
+	}
+
+	// Phase 1: 测试中直接写 store 后需要重新加载内存
+	if err := server.ReloadFromStore(); err != nil {
+		t.Fatalf("reload: %v", err)
 	}
 
 	req := httptest.NewRequest("GET", "/?page=2", nil)
