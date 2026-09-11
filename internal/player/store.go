@@ -114,6 +114,102 @@ func (s *Store) Upsert(p Player) error {
 	return nil
 }
 
+const (
+	// BatchSize 是批量 Upsert 的固定批次大小
+	BatchSize = 100
+	// SQLite 占位符上限约 32766 (SQLITE_MAX_VARIABLE_NUMBER)
+	// 每条记录 10 个字段，32766 / 10 = 3276，但保守设为 1000
+	MaxRecordsPerStatement = 1000
+)
+
+// UpsertBatch 批量插入或更新玩家，使用批事务 + multi-VALUES。
+// 固定批次 N=100（可配置），每批一个事务。
+// 同批 multi-VALUES：同一事务内用一条（或少数几条）INSERT ... VALUES (...),(...),... ON CONFLICT ... DO UPDATE SET ...
+// 去掉每行前置 SELECT joined_at：用 SQL 保留已有 joined_at。
+func (s *Store) UpsertBatch(players []Player) error {
+	if len(players) == 0 {
+		return nil
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+
+	// 按固定批次 N=100 切块
+	for batchStart := 0; batchStart < len(players); batchStart += BatchSize {
+		batchEnd := batchStart + BatchSize
+		if batchEnd > len(players) {
+			batchEnd = len(players)
+		}
+		batch := players[batchStart:batchEnd]
+
+		// 每组一个事务
+		tx, err := s.db.Begin()
+		if err != nil {
+			return fmt.Errorf("begin transaction for batch %d-%d: %w", batchStart, batchEnd, err)
+		}
+
+		// 在同一事务内，可能需要拆成多个 multi-VALUES statement（如果驱动参数上限被迫拆分）
+		// 每个 statement 最多 MaxRecordsPerStatement 条记录
+		for stmtStart := 0; stmtStart < len(batch); stmtStart += MaxRecordsPerStatement {
+			stmtEnd := stmtStart + MaxRecordsPerStatement
+			if stmtEnd > len(batch) {
+				stmtEnd = len(batch)
+			}
+			chunk := batch[stmtStart:stmtEnd]
+
+			// 构造 multi-VALUES SQL
+			// INSERT INTO players (online_id, display_id, avatar_url, bronze, silver, gold, platinum, score, joined_at, synced_at)
+			// VALUES (?,?,?,?,?,?,?,?,?,?),(?,?,?,?,?,?,?,?,?,?),...
+			// ON CONFLICT(online_id) DO UPDATE SET
+			//   display_id = excluded.display_id,
+			//   avatar_url = excluded.avatar_url,
+			//   bronze = excluded.bronze,
+			//   silver = excluded.silver,
+			//   gold = excluded.gold,
+			//   platinum = excluded.platinum,
+			//   score = excluded.score,
+			//   joined_at = players.joined_at,  -- 保留已有 joined_at
+			//   synced_at = excluded.synced_at
+
+			var builder strings.Builder
+			builder.WriteString(`INSERT INTO players (online_id, display_id, avatar_url, bronze, silver, gold, platinum, score, joined_at, synced_at) VALUES `)
+
+			args := make([]interface{}, 0, len(chunk)*10)
+			for i, p := range chunk {
+				if i > 0 {
+					builder.WriteString(",")
+				}
+				builder.WriteString("(?,?,?,?,?,?,?,?,?,?)")
+
+				onlineIDLower := strings.ToLower(p.OnlineID)
+				args = append(args, onlineIDLower, p.DisplayID, p.AvatarURL, p.Bronze, p.Silver, p.Gold, p.Platinum, p.Score, now, now)
+			}
+
+			builder.WriteString(` ON CONFLICT(online_id) DO UPDATE SET
+				display_id = excluded.display_id,
+				avatar_url = excluded.avatar_url,
+				bronze = excluded.bronze,
+				silver = excluded.silver,
+				gold = excluded.gold,
+				platinum = excluded.platinum,
+				score = excluded.score,
+				joined_at = players.joined_at,
+				synced_at = excluded.synced_at`)
+
+			if _, err := tx.Exec(builder.String(), args...); err != nil {
+				tx.Rollback()
+				return fmt.Errorf("exec multi-values for batch %d-%d chunk %d-%d: %w", batchStart, batchEnd, stmtStart, stmtEnd, err)
+			}
+		}
+
+		// COMMIT
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit transaction for batch %d-%d: %w", batchStart, batchEnd, err)
+		}
+	}
+
+	return nil
+}
+
 // Get retrieves a single player by online ID (case-insensitive).
 func (s *Store) Get(onlineID string) (*Player, error) {
 	var p Player
