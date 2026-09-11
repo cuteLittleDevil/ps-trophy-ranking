@@ -578,7 +578,7 @@ v1 已在 main 交付（PR #4–#10，见 `提交历史说明.md`）。实现顺
 
 - 运营侧 NPSSO 是否在演示环境提供？不提供则验收 seed + fake round-tripper + 未配置凭证失败态。
 - 第 12 节记录的是 2026-09-10 现场核对过的非官方端点与字段。URL 若变更，以社区文档 + `--raw` 再核对；**匹配规则与取哪些字段**是契约，不随 URL 漂移而放宽。
-- **SQLite 批量事务 Upsert**（下一步候选，未拍板）：当前 WAL flush 仍逐条 `store.Upsert`；pprof 显示排序已优化后，syscall/I/O 嫌疑大；是否改为单事务批量 Upsert、WAL bufio、SQLite pragma 调优需进一步观测与讨论。
+- **SQLite 批量事务 Upsert**（✅ **已批准方案 B，本 PR 实现**）：WAL flush 改用固定批次 N=100（可做常量/配置），每批一个事务，同批 multi-VALUES upsert。去掉每行前置 SELECT，用 SQL 保留已有 joined_at。只改 WAL flush / ReplaySealed 路径；热路径（`/join` `/refresh`）可继续单条 Upsert。语义：失败保留 sealed 重试不变。
 
 ### 11.2 Technical Risks
 
@@ -901,9 +901,14 @@ score > 门槛分？
    - 同一 `online_id` 可能有多条事件（例如模拟灌数时重复更新）；**只保留 `event_ts` 最新的一条**（或用单调递增 `seq` 字段判断）
 
 3. **批量 Upsert SQLite**：
-   - **在锁外执行** Upsert 到 SQLite
-   - **当前实现**：逐条 `store.Upsert`（单条事务）
-   - **下一步候选（未拍板）**：单事务批量 Upsert、WAL bufio、SQLite pragma 调优（pprof 显示排序已优化后，syscall/I/O 嫌疑大，方案待讨论）
+   - **在锁外执行**批量 Upsert 到 SQLite（例如：`INSERT ... ON CONFLICT(online_id) DO UPDATE SET ...`）
+   - **✅ 已批准方案 B（本 PR 实现）**：
+     - 固定批次 N=100（可做成常量/配置，默认 100）
+     - 每组一个事务：`BEGIN` → 该组写入 → `COMMIT`（失败 `ROLLBACK`，保留 sealed 重试语义不变）
+     - 同批 multi-VALUES：同一事务内用一条（或少数几条）`INSERT INTO players (...) VALUES (...),(...),... ON CONFLICT(online_id) DO UPDATE SET ...`
+     - 去掉每行前置 SELECT joined_at：用 SQL 保留已有 joined_at（`joined_at = players.joined_at` 或等价写法）；新行写 now，冲突行保留旧值
+     - 驱动参数上限被迫拆成更小 multi-VALUES 片时，仍须在同一事务内
+   - 使用事务减少 fsync 次数
 
 4. **更新内存与 Top1000**：
    - **在锁外更新**全量内存结构（或使用专用内存锁，避免阻塞 WAL 写入）
@@ -1080,6 +1085,13 @@ score > 门槛分？
    - 启动时重放未处理 sealed 段
    - `/join` `/refresh` 仍同步写库（热路径），seed 走 WAL（冷路径）
    - **验收**：`/admin/seed` 支持大批量灌数（如 10000+）；入队即返回 JSON（enqueued/failed）；可见延迟约 100ms-1s
+
+   **Phase 2+ WAL 批事务刷盘优化** ⏳ **本 PR 实现（已批准方案 B）**
+   - WAL flush 路径改用批事务 + multi-VALUES（固定批次 N=100，可配置）
+   - 每批一个事务：`BEGIN` → multi-VALUES upsert → `COMMIT`（失败 `ROLLBACK`，保留 sealed 重试语义）
+   - 去掉每行前置 SELECT joined_at：用 SQL `ON CONFLICT ... DO UPDATE SET joined_at = players.joined_at` 保留已有值
+   - 只改 WAL flush / ReplaySealed 路径；热路径（`/join` `/refresh`）可继续单条 Upsert
+   - **验收**：大批量 flush（如 1000+ 条）时，I/O 与事务开销显著降低；所有测试通过
 
 3. **Phase 3**：Prometheus metrics + 反压（待实现）
    - 暴露 Prometheus metrics（写入 QPS、WAL 状态、刷盘性能、Top1000 门槛分等，见 §13.7.2）
