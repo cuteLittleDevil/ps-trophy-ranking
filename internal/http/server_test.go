@@ -439,8 +439,9 @@ func setupTestServer(t *testing.T) (*Server, *player.Store) {
 
 	templatesFS := os.DirFS("../../web/templates")
 	staticFS := os.DirFS("../../web/static")
-	walMgr, _ := wal.New(tmpDir, 10)
-	defer walMgr.Close()
+	walDir := filepath.Join(tmpDir, "wal")
+	walMgr, _ := wal.New(walDir, 10)
+	t.Cleanup(func() { walMgr.Close() })
 
 	server, err := New(store, source, walMgr, templatesFS, staticFS)
 	if err != nil {
@@ -499,7 +500,7 @@ func TestAdminSeedSuccess(t *testing.T) {
 	}
         // Phase 2: WAL 写入是异步的，不立即验证数据库内容
         // 封段刷盘后数据才会出现在 SQLite，测试只验证入队成功
-
+}
 func TestAdminSeedInvalidCount(t *testing.T) {
 	server, store := setupTestServer(t)
 	defer store.Close()
@@ -572,6 +573,7 @@ func TestAdminSeedExceedsMax(t *testing.T) {
 }
 
 func TestAdminSeedCumulative(t *testing.T) {
+	// Phase 2: WAL 写入是异步的，测试只验证两次入队都成功
 	server, store := setupTestServer(t)
 	defer store.Close()
 
@@ -584,8 +586,17 @@ func TestAdminSeedCumulative(t *testing.T) {
 	w := httptest.NewRecorder()
 	server.Handler().ServeHTTP(w, req)
 
-	players1, _ := store.ListAll()
-	count1 := len(players1)
+	var resp1 map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp1)
+
+	if !resp1["ok"].(bool) {
+		t.Error("first seed should succeed")
+	}
+
+	enqueued1 := int(resp1["enqueued"].(float64))
+	if enqueued1 != 3 {
+		t.Errorf("first seed enqueued = %d, want 3", enqueued1)
+	}
 
 	// Second seed
 	form = url.Values{}
@@ -596,12 +607,19 @@ func TestAdminSeedCumulative(t *testing.T) {
 	w = httptest.NewRecorder()
 	server.Handler().ServeHTTP(w, req)
 
-	players2, _ := store.ListAll()
-	count2 := len(players2)
+	var resp2 map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp2)
 
-	if count2 != count1+2 {
-		t.Errorf("second seed should add to existing, got %d want %d", count2, count1+2)
+	if !resp2["ok"].(bool) {
+		t.Error("second seed should succeed")
 	}
+
+	enqueued2 := int(resp2["enqueued"].(float64))
+	if enqueued2 != 2 {
+		t.Errorf("second seed enqueued = %d, want 2", enqueued2)
+	}
+
+	// Phase 2: 不验证累加数据库内容，因为 WAL 刷盘是异步的
 }
 
 func TestAdminSeedNonLoopback(t *testing.T) {
