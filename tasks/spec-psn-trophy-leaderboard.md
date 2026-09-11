@@ -45,10 +45,13 @@
 
 浏览器只访问本服务。`/join`、`/refresh` 由本服务持有运营侧 NPSSO，代表去查目标 Online ID 的公开奖杯汇总。访客不提交密码或 token。`/admin/seed` 不访问 PSN。
 
+**当前架构状态**：v1 基线（PR #1–#10）已升级至高吞吐演进架构（PR #11–#16，Phase 1+2 + 排序优化）。全量内存 + Top1000 视图；双路径写入（热路径同步 SQLite，冷路径 WAL 异步刷盘）；详见 §13。
+
 ```
 Browser  --HTML form-->  Go HTTP server (chi)
-                            |-- ranking (pure)
-                            |-- player store (SQLite)
+                            |-- memrank (全量内存 + Top1000 视图)
+                            |-- WAL (冷路径 10 分片 + 封段刷盘)
+                            |-- player store (SQLite 持久化 + 启动加载)
                             |-- trophy.Source → PSN client (resty) --> unofficial PSN API
                             |-- POST /admin/seed (loopback only, no PSN)
 ```
@@ -59,6 +62,8 @@ Browser  --HTML form-->  Go HTTP server (chi)
 |-----------|----------------|----------|
 | `cmd/server` | 读配置、接线、监听 HTTP | 含业务规则 |
 | `internal/http` | 路由、表单、模板、cookie、灌数、把领域错误映到中文页 | 直连 PSN |
+| `internal/memrank` | 全量内存排行榜 + Top1000 视图；门槛分；线程安全读写 | 直连 PSN |
+| `internal/wal` | 10 分片 WAL 文件；封段协议；崩溃恢复重放 | 业务规则 |
 | `internal/rank` | 积分、排序、竞赛名次、分页切片 | I/O |
 | `internal/player` | 玩家 upsert、按 ID 查、列表读取 | 排名公式 |
 | `internal/trophy` | `Source` 接口；PSN 实现（错误码映射） | 写库、记冷却 |
@@ -67,25 +72,25 @@ Browser  --HTML form-->  Go HTTP server (chi)
 
 ### 2.3 Module Interactions
 
-入榜：`HTTP` 校验 Online ID → 读 store 做 15 分钟冷却 → `trophy.Source.Lookup` → 校验计数与头像 URL → `rank.Score` → `player.Upsert` → Set-Cookie → 302 到含 `page` + `highlight` 的榜页。
+**热路径写入**（`/join` `/refresh`）：`HTTP` 校验 Online ID → 读 store 做 15 分钟冷却 → `trophy.Source.Lookup` → 校验计数与头像 URL → `rank.Score` → `player.Upsert` 同步 SQLite → `memrank.Upsert` 更新内存 + Top1000 → Set-Cookie → 302 到含 `page` + `highlight` 的榜页。
 
-刷新：校验 ID → 必须已在榜 → 同一冷却 → 与入榜相同的 Lookup / 校验 / Upsert → 302 到表单携带的 `page`（非法则 1）并高亮。
+**冷路径写入**（`/admin/seed`）：回环检查 → 解析 `count` → 生成 `sim`+7 位数字 ID（查重）→ 随机奖杯与 `letter:` 头像 → `rank.Score` → `wal.Append` 追加到分片文件 → 立即返回 JSON（`enqueued`）。后台 Worker 每 100ms 封段刷盘：rename sealed → 读取去重 → 批量 Upsert SQLite → `memrank.UpsertBatch` 更新内存 → 删除 sealed。
 
-看榜：`player.ListAll` → `rank.SortAndNumber` → 按页切片 → 渲染。
+**读取榜单**（`GET /`）：`memrank.Page(page, perPage)` → 名次 ≤1000 走 Top1000 视图，之外走全量有序结构 → 按页切片 → 渲染 HTML。稳态读不访问 SQLite。
 
-查找 / 我的排名：校验 ID → 在已排序列表定位 → 存在则 302 到对应页并高亮；不存在则 200 渲染「尚未入榜」。查找命中时设置 cookie。
-
-灌数：回环检查 → 解析 `count` → 生成 `sim`+7 位数字 ID（查重）→ 随机奖杯与 `letter:` 头像 → `rank.Score` → `Upsert` → JSON。
+**查找 / 我的排名**（`/search` `/me`）：校验 ID → `memrank.Get(onlineID)` 从内存 map O(1) 查找 → 存在则用 `indexByID` O(1) 定位名次，302 到对应页并高亮；不存在则 200 渲染「尚未入榜」。查找命中时设置 cookie。
 
 ### 2.4 File Structure
 
 ```
 cmd/psnlookup/main.go           CLI：用 NPSSO 按 Online ID 拉奖杯汇总
-cmd/server/main.go              HTTP 服务入口；只接线 PSN Source
-internal/config/config.go       PSN_NPSSO / DB_PATH / LISTEN_ADDR
+cmd/server/main.go              HTTP 服务入口；接线 PSN Source / memrank / WAL
+internal/config/config.go       PSN_NPSSO / DB_PATH / LISTEN_ADDR / WAL_DIR / WAL_SEAL_INTERVAL_MS
 internal/http/server.go         chi 路由与全部 handler（无独立 handlers.go）
-internal/rank/rank.go           Score / SortAndNumber / Page
-internal/player/store.go        SQLite
+internal/memrank/memrank.go     全量内存排行榜 + Top1000 视图 + 批量更新
+internal/wal/wal.go             10 分片 WAL 文件 + 封段刷盘 Worker
+internal/rank/rank.go           Score / SortAndNumber / Page（标准库排序，O(N log N)）
+internal/player/store.go        SQLite 持久化与批量 Upsert
 internal/trophy/source.go       Source 接口与 typed error
 internal/trophy/psn.go          PSN Source 包装
 internal/psn/client.go          非官方 API
@@ -505,36 +510,49 @@ v1 本地演示：个位数并发、最多数百行。**万级并发写入与秒
 
 ## 10. Implementation Status
 
-### 10.1 当前状态：Phase 1（内存排行榜）
+### 10.1 当前状态：Phase 1+2 + 排序优化（已落地）
 
-**最新落地**：2026-09-11 PR #12 实现 §13.8 **Phase 1**（全量内存 + Top1000 视图）
+**最新落地**：2026-09-11 PR #11–#16，完整实现高吞吐写入演进架构 Phase 1+2 及排序优化
+
+#### Phase 1（内存排行榜，PR #12）
 
 - ✅ 启动时从 SQLite `ListAll` 加载全量玩家到内存
 - ✅ 维护有序 `ranked` 列表与 **Top1000 视图**
 - ✅ 计算门槛分（第 1000 名 score；不足 1000 人时为 −1）
-- ✅ 所有**写入**（`/join`、`/refresh`、`/admin/seed`）：同步 Upsert SQLite 后立即更新内存 + Top1000
 - ✅ 所有**读取**（`GET /`、`/search`、`/me`）：从内存读取，不再每次 `ListAll` + `SortAndNumber`
 - ✅ 分页逻辑：名次 ≤1000 走 Top1000 视图；之外走全量有序结构
-- ✅ 测试覆盖：内存加载、upsert 后可读、Top1000 切片、search/me 从内存查找
 
-**Phase 1 行为（2026-09-11 PR #12）**：
+#### Phase 2（WAL 冷路径，PR #13）
 
-- 读路径性能提升（无需每次全量 SQL 查询与排序）
-- 写路径仍为 v1 行为（同步 SQLite，适合真实 PSN 低频入榜）
-- 无 WAL 文件
+- ✅ 双路径写入：`/join` `/refresh` 热路径（同步 SQLite + 内存）；`/admin/seed` 冷路径（WAL 追加）
+- ✅ 10 个 hash 分片文件（`data/wal/shard-N.log`）
+- ✅ 封段协议：每 100ms rename 为 sealed → 读取去重 → 批量 Upsert SQLite + 内存 → 删除 sealed
+- ✅ 启动时自动重放未处理 sealed 段
+- ✅ 硬顶 100 万条/次（PR #14）
 
-**Phase 2 行为（2026-09-11 当前 PR）**：
+#### 可观测性与性能优化（PR #14–#16）
 
-- `/admin/seed` 走 WAL 冷路径：追加到 10 分片，封段刷盘
-- `/join` `/refresh` 仍走热路径（同步 SQLite + 内存）
-- 启动时自动重放 sealed 段
-- WAL 目录默认 `./data/wal/`，已 gitignore
+- ✅ **pprof 监控**：挂载到 `/debug/pprof/`，本机访问（PR #14）
+- ✅ **slog 日志**：全仓库统一使用 `log/slog`，禁止打印敏感凭证（PR #14）
+- ✅ **WAL 锁优化**：封段 flush 仅 rename+创建新文件在锁内，读取+刷盘+内存更新在锁外（PR #14）
+- ✅ **批量内存更新**：`UpsertMemoryBatch` 避免逐条 rebuild（PR #15）
+- ✅ **排序优化 A**：`rank.SortAndNumber` 使用 `slices.SortFunc`，O(N log N) 替代 O(N²) 插入排序（PR #16）
+- ✅ **排序优化 B**：`memrank.UpsertBatch` 使用有序合并，复杂度从 O(M * N log N) 优化为 O(M log M + N)（PR #16）
+- ✅ **O(1) 查找**：`indexByID map[string]int` 实现常数时间玩家定位（PR #16）
 
-**未实现（Phase 3+）**：
+#### 当前行为总结
 
-- Prometheus metrics、反压（§13.7）
-- 热路径 micro-batch（§13.8 Phase 4）
-- 双路径门槛判断（当前 `/join` `/refresh` 始终热路径）
+- **读路径**：全量内存 + Top1000 视图，稳态读不访问 SQLite
+- **热路径写入**：`/join` `/refresh` 同步 SQLite + 实时内存更新
+- **冷路径写入**：`/admin/seed` WAL 追加 → 封段刷盘（可见延迟 ≤1s）
+- **排序性能**：1 万～10 万量级 rebuild/flush 不再卡在插入排序
+- **硬顶限制**：单次 seed 最多 100 万条
+
+#### 未实现（后续）
+
+- Prometheus metrics、反压（§13.7 可观测性建议）
+- 热路径 micro-batch（§13.8 Phase 4，可选优化）
+- 双路径门槛判断（当前 `/join` `/refresh` 始终热路径，seed 始终冷路径）
 
 ### 10.2 v1 基线回顾
 
@@ -765,13 +783,21 @@ CLI / 入榜记录只映射：
 
 ---
 
-## 13. 高吞吐写入演进架构（已批准，待实现）
+## 13. 高吞吐写入演进架构（已落地：Phase 1+2 + 排序优化）
 
 ### 13.1 设计状态与背景
 
-**状态**：本设计已通过技术评审并批准，作为排行榜系统后续演进方向。**当前 main 分支仍为 v1 行为**（同步 SQLite Upsert + 全量内存排序）；本架构落地将通过独立 PR 实现，届时替换第 2、5、8 节描述的写入与读取路径。
+**状态**：本设计已通过技术评审并批准，**Phase 1（内存排行榜）、Phase 2（WAL 冷路径）及排序优化已落地**（PR #11–#16，2026-09-11）。当前 main 实现了：全量内存 + Top1000 视图 + 双路径写入（热/冷）+ WAL 分片封段刷盘 + 标准库排序与有序合并优化。
 
-**批准日期**：2026-09-11
+**批准与实现日期**：2026-09-11（设计）、2026-09-11（Phase 1+2 + 排序优化）
+
+**实现 PR**：
+- PR #11: 文档（高吞吐设计 + Mermaid 流程图）
+- PR #12: Phase 1（全量内存 + Top1000）
+- PR #13: Phase 2（WAL 分片 + 封段刷盘）
+- PR #14: 硬顶 100 万 + pprof + slog + 锁优化
+- PR #15: UpsertMemoryBatch（批量内存更新）
+- PR #16: 排序算法优化 A+B（标准库排序 + 有序合并）
 
 **核心目标**：支撑**约每秒 1 万次**模拟推送/灌数级别的更新操作（注：这不是真实 PSN QPS；真实 PSN 仍受限流与冷却保护），同时保持排行榜**秒级可见性**，并继续使用 **SQLite** 作为持久化方案。
 

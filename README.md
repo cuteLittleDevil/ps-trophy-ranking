@@ -224,23 +224,44 @@ go build ./cmd/server
 
 - 产品需求：`tasks/prd-psn-trophy-leaderboard.md`
 - 技术方案：`tasks/spec-psn-trophy-leaderboard.md`
+- **架构图与设计详解**：`docs/architecture.md`（含系统总览、写入/读取流程、WAL 封段时序、性能优化）
 - 提交历史：`提交历史说明.md`
 - 进度：`ROADMAP.md`
 - 奖杯拉取流程：`docs/flowchart.html`
 
 ## 架构
 
-**当前状态：Phase 2 + 排序优化**
+**当前状态：Phase 2 + 排序优化（已落地）**
 
-v1 已演进至 Phase 2：
-- **Phase 1**（已落地）：启动时从 SQLite 加载全量玩家到内存，维护 Top1000 视图与门槛分。所有读取从内存完成，稳态读不再每次 `ListAll` + 全量重排
-- **Phase 2**（已落地）：WAL 分片写入 + 封段刷盘。模拟数据走 WAL 异步批量更新，真实 PSN 入榜/刷新仍走同步路径
+v1 已演进至高吞吐写入架构 Phase 2（PR #11–#16，2026-09-11）：
+- **Phase 1**：全量内存排行榜 + Top1000 视图 + 门槛分；稳态读不访问 SQLite
+- **Phase 2**：双路径写入（热路径同步 SQLite，冷路径 WAL 异步刷盘）+ 10 分片 + 封段协议
+- **排序优化**：标准库排序 O(N log N) + 有序合并 O(M log M + N) + O(1) 查找
 
-**排序优化（本 PR）**：
-- **优化 A**：全量排序使用标准库 `slices.SortFunc`，O(N log N) 替代 O(N²) 插入排序
-- **优化 B**：WAL 批量 flush 使用有序合并（ordered merge），避免每次批量更新时对全量数据重排序
-  - 复杂度从 O(M * N log N) 优化为 O(M log M + N)（批量 M，总量 N）
-  - 新增 `indexByID` map 实现 O(1) 查找
+**详细架构文档**：[docs/architecture.md](docs/architecture.md)，包含：
+- 系统总览图（HTTP / memrank / WAL / SQLite / PSN）
+- 写入流程图（热路径 vs 冷路径，带时序图）
+- 读取流程图（Top1000 vs 全量内存）
+- WAL 封段刷盘时序
+- 性能优化总结（排序 A+B、WAL 锁优化、批量更新）
+
+### 系统组件总览
+
+```mermaid
+graph LR
+    Browser[浏览器] -->|HTTP| Server[Go HTTP Server]
+    Server -->|读| Mem[内存排行榜<br/>Top1000+全量]
+    Server -->|热写| SQLite[(SQLite)]
+    Server -->|冷写| WAL[WAL 10分片]
+    WAL -.->|封段刷盘| SQLite
+    SQLite -.->|启动加载| Mem
+    Server -->|真实PSN| PSN[PSN API]
+    
+    style Mem fill:#e1f5ff
+    style WAL fill:#fff4e1
+```
+
+### 模块结构
 
 ```
 cmd/
@@ -249,14 +270,18 @@ cmd/
 internal/
   config/         - 环境变量配置
   http/           - HTTP 路由与模板渲染
-  memrank/        - Phase 1: 全量内存排行榜 + Top1000 视图
-  player/         - SQLite 持久化
+  memrank/        - 全量内存排行榜 + Top1000 视图
+  wal/            - 10 分片 WAL + 封段刷盘 Worker
+  player/         - SQLite 持久化与批量 Upsert
   psn/            - Sony 非官方 API 客户端
   rank/           - 积分、排序、竞赛名次、分页
   trophy/         - 数据源接口（PSN；测试注入 fake Source）
 web/
   templates/      - HTML 模板
-  static/         - CSS 和占位图
+  static/         - CSS
+docs/
+  architecture.md - 架构详解（含 Mermaid 流程图）
+  flowchart.html  - PSN 调用链流程图
 ```
 
 ## 依赖
