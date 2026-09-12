@@ -546,10 +546,11 @@ func TestLeaderboard_UpsertBatch_LargeScale(t *testing.T) {
 		t.Errorf("player 0: expected score %d, got %d", expectedScore, p0.Score)
 	}
 
-	// 验证排序正确性
-	for i := 1; i < len(lb.ranked); i++ {
-		prev := lb.ranked[i-1]
-		curr := lb.ranked[i]
+	// 验证排序正确性（通过公开 Page API，兼容 Left-Right）
+	all := lb.Page(1, lb.Count())
+	for i := 1; i < len(all); i++ {
+		prev := all[i-1]
+		curr := all[i]
 		if prev.Score < curr.Score {
 			t.Errorf("position %d: score order violation, prev=%d < curr=%d", i, prev.Score, curr.Score)
 			break

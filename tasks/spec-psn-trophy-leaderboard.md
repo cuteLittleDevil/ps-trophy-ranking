@@ -62,7 +62,7 @@ Browser  --HTML form-->  Go HTTP server (chi)
 |-----------|----------------|----------|
 | `cmd/server` | 读配置、接线、监听 HTTP | 含业务规则 |
 | `internal/http` | 路由、表单、模板、cookie、灌数、把领域错误映到中文页 | 直连 PSN |
-| `internal/memrank` | 全量内存排行榜 + Top1000 视图；门槛分；线程安全读写 | 直连 PSN |
+| `internal/memrank` | 全量内存排行榜 + Top1000；门槛分；**Left-Right 双数组（§13.10）** | 直连 PSN |
 | `internal/wal` | 10 分片 WAL 文件；封段协议；崩溃恢复重放 | 业务规则 |
 | `internal/rank` | 积分、排序、竞赛名次、分页切片 | I/O |
 | `internal/player` | 玩家 upsert、按 ID 查、列表读取 | 排名公式 |
@@ -550,6 +550,7 @@ v1 本地演示：个位数并发、最多数百行。**万级并发写入与秒
 
 #### 未实现（后续）
 
+- ✅ **memrank Left-Right 双数组**（§13.10，已落地）：暗面更新 → 原子切换读指针 → 亮面追平；读不经过长写锁
 - Prometheus metrics、反压（§13.7 可观测性建议）
 - 热路径 micro-batch（§13.8 Phase 4，可选优化）
 - 双路径门槛判断（当前 `/join` `/refresh` 始终热路径，seed 始终冷路径）
@@ -578,7 +579,8 @@ v1 已在 main 交付（PR #4–#10，见 `提交历史说明.md`）。实现顺
 
 - 运营侧 NPSSO 是否在演示环境提供？不提供则验收 seed + fake round-tripper + 未配置凭证失败态。
 - 第 12 节记录的是 2026-09-10 现场核对过的非官方端点与字段。URL 若变更，以社区文档 + `--raw` 再核对；**匹配规则与取哪些字段**是契约，不随 URL 漂移而放宽。
-- **SQLite 批量事务 Upsert**（✅ **已批准方案 B，本 PR 实现**）：WAL flush 改用固定批次 N=100（可做常量/配置），每批一个事务，同批 multi-VALUES upsert。去掉每行前置 SELECT，用 SQL 保留已有 joined_at。只改 WAL flush / ReplaySealed 路径；热路径（`/join` `/refresh`）可继续单条 Upsert。语义：失败保留 sealed 重试不变。
+- **SQLite 批量事务 Upsert**（✅ **已落地，PR #18**）：WAL flush 固定批次 N=100，每批一个事务，同批 multi-VALUES；SQL 保留 joined_at；热路径仍单条 Upsert。
+- **memrank Left-Right 双数组**（✅ **已落地，2026-09-12**）：见 §13.10。
 
 ### 11.2 Technical Risks
 
@@ -589,6 +591,7 @@ v1 已在 main 交付（PR #4–#10，见 `提交历史说明.md`）。实现顺
 | NPSSO 泄露 | 运营账号风险 | 环境变量、禁止日志 dump、不收用户 token |
 | `/admin/seed` 暴露 | 任意灌数 | 只接受回环；README 警告勿绑公网 |
 | SQLite 锁 | 本地演示几乎不出现 | v1 忽略；高并发是后续 PRD |
+| memrank 写锁合并阻塞读 | 百万级 `UpsertBatch` 持写锁百毫秒，读榜卡顿 | **Left-Right 双数组（§13.10，已批准）**；千万整表双份另议 |
 
 ### 11.3 Assumptions
 
@@ -1086,21 +1089,78 @@ score > 门槛分？
    - `/join` `/refresh` 仍同步写库（热路径），seed 走 WAL（冷路径）
    - **验收**：`/admin/seed` 支持大批量灌数（如 10000+）；入队即返回 JSON（enqueued/failed）；可见延迟约 100ms-1s
 
-   **Phase 2+ WAL 批事务刷盘优化** ⏳ **本 PR 实现（已批准方案 B）**
+   **Phase 2+ WAL 批事务刷盘优化** ✅ **已落地（2026-09-11 PR #18，方案 B）**
    - WAL flush 路径改用批事务 + multi-VALUES（固定批次 N=100，可配置）
    - 每批一个事务：`BEGIN` → multi-VALUES upsert → `COMMIT`（失败 `ROLLBACK`，保留 sealed 重试语义）
    - 去掉每行前置 SELECT joined_at：用 SQL `ON CONFLICT ... DO UPDATE SET joined_at = players.joined_at` 保留已有值
    - 只改 WAL flush / ReplaySealed 路径；热路径（`/join` `/refresh`）可继续单条 Upsert
    - **验收**：大批量 flush（如 1000+ 条）时，I/O 与事务开销显著降低；所有测试通过
 
-3. **Phase 3**：Prometheus metrics + 反压（待实现）
+3. **Phase 2++ memrank Left-Right 双数组** ✅ **已落地（§13.10，2026-09-12）**
+   - 启动双份有序视图；更新暗面 → 原子切换读指针 → 追平另一面
+   - 目标约百万用户读不堵；拆分 dark/publish/light 耗时与内存估算日志
+   - **验收**：合并进行中读路径不被同量级阻塞；A/B 追平一致；测试绿
+
+4. **Phase 3**：Prometheus metrics + 反压（待实现）
    - 暴露 Prometheus metrics（写入 QPS、WAL 状态、刷盘性能、Top1000 门槛分等，见 §13.7.2）
    - 增加反压与告警（sealed 段积压超阈值触发反压）
    - **验收**：监控面板可用，反压机制生效
 
-4. **Phase 4（可选 follow-up）**：热路径 micro-batch（待实现）
+5. **Phase 4（可选 follow-up）**：热路径 micro-batch（待实现）
    - 若观测到热路径仍有冲击，增加 10ms 窗口聚合
    - **验收**：热路径 QPS 进一步提升
+
+
+### 13.10 memrank Left-Right 双数组（已落地）
+
+**状态**：✅ **已落地（2026-09-12，本机实现）**。本阶段目标：**约百万用户**下，排行榜读路径不被内存合并的写锁长时间阻塞；**千万级整表双份**不作为本阶段终局（内存与双倍合并成本过高，后续另议树/分片/Top-N 分层）。
+
+**背景（观测）**：
+
+- 当前 `memrank.UpsertBatch` 在 `sync.RWMutex` 写锁内完成 filter / 批次排序 / 二路归并 / 赋名次 / 重建 `indexByID`（复杂度 O(M log M + N)）。
+- 压测日志示例：N≈120 万、M≈1 万时，`duration≈160–200ms`。写锁持有期间，`Get` / `Page` / `IndexOf` 的读锁全部阻塞，用户刷新榜单会卡顿。
+- 排序与 SQLite 批事务优化后，**读卡顿的主因是「持锁做整表合并」**，不是合并算法本身不可用。
+
+**批准方案：Left-Right（A/B 双数组交替）**
+
+启动时创建两份逻辑等价的有序视图（记为面 A、面 B；含该面所需的 `ranked` / `top1000` / `indexByID` 等读结构）。读指针指向其中一面。`players` 权威字段 map 可保持单份（按 `online_id` 存），不必双份。
+
+单轮更新协议：
+
+1. **更新暗面**：在非当前读指针指向的一面上，应用本批 upsert（有序合并等重活只打在暗面）。读者仍读亮面，**不获取写锁做合并**。
+2. **原子切换**：发布新读指针，使后续读走到刚更新完的一面（`atomic` 指针或等价发布）。
+3. **追平亮面（原读面）**：将同一批更新再应用到另一面，使 A、B 再次一致，供下一轮交替。
+4. 下一轮交换「暗/亮」角色，重复 1–3。
+
+约束：
+
+- **单写者**：`/join` `/refresh` 与 WAL flush 的内存更新必须串行进入同一写协议（可用一把只保护「谁在改暗面+切换」的互斥），避免两面状态交错。
+- **读路径**：只通过当前读指针访问只读视图；禁止在亮面上做原地长耗时写。
+- **可见性**：切换完成后读者立即看到新快照；冷路径整体仍受 WAL 封段延迟约束（≤1s 量级）。
+- **内存**：稳态约 **2×** 有序视图（`ranked` + 每面 index/Top1000）。百万级预期可接受（视 AvatarURL 长度，有序表双面常见为数百 MB 量级）；实现时需日志估算（见下）。
+- **CPU**：每轮更新对两面各做一次合并，约为当前单面合并的 **~2× CPU**；换取读侧不堵百毫秒写锁。
+
+**刻意不做（本阶段）**：
+
+- 千万用户整表双 `[]RankedPlayer` 作为终局（改树/分片/仅 Top-N 内存另开设计）。
+- 多写者并发改两面。
+
+**可观测性（实现时必须）**：
+
+- 拆分日志：`update_dark_ms`、`publish_ms`、`sync_light_ms`、`batch_size`、`ranked_n`（勿再把整段合并时间记成「读也会等的写锁时间」）。
+- **内存估算日志**（启动或定时/按 N 里程碑）：
+  - `ranked_header_bytes ≈ cap(ranked) * sizeof(RankedPlayer)`（不含 string 字符）
+  - `ranked_string_bytes`：累加 `OnlineID`/`DisplayID`/`AvatarURL` 的 `len`
+  - 双面预算：`≈ 2 * (header + strings)`（若 index 每面一份，另估 map）
+  - 进程级可辅以 `pprof heap` / RSS 对照
+
+**验收**：
+
+- 约 100 万用户、`UpsertBatch` M≈1 万时：读榜 / 查找在合并进行期间仍可在合理延迟内返回（不再出现与合并同量级的整段阻塞）。
+- A/B 在每轮追平后内容一致（单测覆盖切换与追平）。
+- 热路径与冷路径内存更新共用同一 Left-Right 写协议；`go test ./...` 通过。
+
+**参考**（设计依据，非依赖）：Left-Right 并发控制；Linux RCU 的「读不与写互斥、发布新版本」思想。本实现采用用户空间双数组交替，而非内核 RCU。
 
 ### 13.9 文档更新计划
 
