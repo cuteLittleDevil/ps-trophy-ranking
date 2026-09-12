@@ -4,7 +4,7 @@ PSN 奖杯用户排行榜。v1 排行榜页面已完成，从真实 PSN 档案�
 
 ## 系统架构
 
-**当前版本：Phase 2+ 高吞吐演进架构已落地**
+**当前版本：Phase 2++（Left-Right 内存榜）已落地**
 
 本系统是一个**单机 Go 服务**，使用 **SQLite** 持久化 + **全量内存排行榜** + **WAL 分片异步写入**，支撑 ~10,000 更新/秒（压测/灌数场景）。
 
@@ -16,6 +16,7 @@ PSN 奖杯用户排行榜。v1 排行榜页面已完成，从真实 PSN 档案�
 | **Phase 1+ 排序优化** | ✅ 已落地 | #15, #16 | 标准库排序 O(N log N) + 有序合并 O(M log M + N) + O(1) 查找 |
 | **Phase 2** | ✅ 已落地 | #13 | WAL 10 分片 + 封段刷盘（100ms 周期）；冷路径异步写入 |
 | **Phase 2+ 批事务优化** | ✅ 已落地 | #18 | **方案 B**：批次 N=100 + multi-VALUES + SQL 保留 joined_at；热路径仍单条 |
+| **Phase 2++ Left-Right** | ✅ 已落地 | 本分支 | memrank 双面：更新暗面 → 原子切换读指针 → 追平亮面；读不被长合并挡住 |
 
 ### 核心特性
 
@@ -26,6 +27,8 @@ PSN 奖杯用户排行榜。v1 排行榜页面已完成，从真实 PSN 档案�
 - **批事务刷盘（方案 B，PR #18）**：每 100 条一个事务 + multi-VALUES，1000 条 flush 从 ~1000 次 fsync 降至 ~10 次
 - **排序优化**：标准库 O(N log N) + 有序合并，10 万玩家排序 ~50ms，1000 条批量更新 ~100ms
 - **WAL 锁优化**：持锁仅 rename + 创建新文件（毫秒级），读取/解析/DB upsert/内存 rebuild 在锁外
+- **Left-Right 内存榜**：双有序视图交替发布，百万级合并时读榜不堵在写锁上；日志含 `update_dark_ms` / `publish_ms` / `sync_light_ms`
+- **页面体验**：入榜/查找/我的排名成功后跳到对应页并滚到高亮行；页头展示当前参与排行榜人数
 
 ### 架构图
 
@@ -42,7 +45,7 @@ HTTP Server (chi) ← pprof (/debug/pprof/)
                             ├─ Rename → Sealed
                             ├─ 读取 + 去重
                             ├─ UpsertBatch (方案 B: N=100, multi-VALUES)
-                            └─ MemRank.UpsertBatch (有序合并)
+                            └─ MemRank.UpsertBatch (Left-Right + 有序合并)
                                     ↓
                               SQLite (leaderboard.db)
                                     ↓

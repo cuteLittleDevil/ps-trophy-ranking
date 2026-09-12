@@ -27,11 +27,11 @@ import (
 )
 
 const (
-	pageSize       = 50
-	cookieName     = "online_id"
-	cookieMaxAge   = 2592000 // 30 days
-	minIDLength    = 3
-	maxIDLength    = 16
+	pageSize     = 50
+	cookieName   = "online_id"
+	cookieMaxAge = 2592000 // 30 days
+	minIDLength  = 3
+	maxIDLength  = 16
 )
 
 var idPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
@@ -70,7 +70,7 @@ func New(store *player.Store, source trophy.Source, walMgr *wal.Manager, templat
 		},
 		"toUpper": func(s string) string { return strings.ToUpper(s) },
 	}
-	
+
 	tmpl, err := template.New("").Funcs(funcMap).ParseFS(templatesFS, "*.html")
 	if err != nil {
 		return nil, fmt.Errorf("parse templates: %w", err)
@@ -84,7 +84,7 @@ func New(store *player.Store, source trophy.Source, walMgr *wal.Manager, templat
 	}
 	slog.Info("Loading players into memory leaderboard", slog.Int("count", len(players)))
 	leaderboard.Load(players)
-	slog.Info("Memory leaderboard initialized", 
+	slog.Info("Memory leaderboard initialized",
 		slog.Int("total_players", leaderboard.Count()),
 		slog.Int("threshold_score", leaderboard.ThresholdScore()))
 
@@ -102,10 +102,10 @@ func New(store *player.Store, source trophy.Source, walMgr *wal.Manager, templat
 // Handler returns the HTTP handler.
 func (s *Server) Handler() http.Handler {
 	r := chi.NewRouter()
-	
+
 	// Middleware
 	r.Use(middleware.Recoverer)
-	
+
 	// pprof routes (显式挂载，不依赖 http.DefaultServeMux)
 	r.HandleFunc("/debug/pprof/", pprof.Index)
 	r.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
@@ -118,7 +118,7 @@ func (s *Server) Handler() http.Handler {
 	r.Handle("/debug/pprof/goroutine", pprof.Handler("goroutine"))
 	r.Handle("/debug/pprof/mutex", pprof.Handler("mutex"))
 	r.Handle("/debug/pprof/threadcreate", pprof.Handler("threadcreate"))
-	
+
 	// Routes
 	r.Get("/", s.handleHome)
 	r.Post("/join", s.handleJoin)
@@ -127,7 +127,7 @@ func (s *Server) Handler() http.Handler {
 	r.Get("/me", s.handleMe)
 	r.Post("/admin/seed", s.handleAdminSeed)
 	r.Handle("/static/*", http.StripPrefix("/static/", http.FileServer(http.FS(s.staticFS))))
-	
+
 	return r
 }
 
@@ -135,6 +135,7 @@ type pageData struct {
 	Players      []rankedPlayerView
 	CurrentPage  int
 	TotalPages   int
+	TotalPlayers int
 	Error        string
 	InfoMessage  string
 	EmptyMessage string
@@ -159,6 +160,7 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
 	if count == 0 {
 		s.render(w, pageData{
 			EmptyMessage: "还没有玩家入榜",
+			TotalPlayers: 0,
 		})
 		return
 	}
@@ -170,6 +172,7 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
 			EmptyMessage: "没有更多玩家",
 			CurrentPage:  page,
 			TotalPages:   totalPages,
+			TotalPlayers: count,
 		})
 		return
 	}
@@ -185,9 +188,10 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.render(w, pageData{
-		Players:     views,
-		CurrentPage: page,
-		TotalPages:  totalPages,
+		Players:      views,
+		CurrentPage:  page,
+		TotalPages:   totalPages,
+		TotalPlayers: count,
 	})
 }
 
@@ -524,7 +528,7 @@ func (s *Server) renderError(w http.ResponseWriter, errMsg, inputID string) {
 	// Phase 1: 从内存读取第一页，用于错误页面仍显示榜单
 	var views []rankedPlayerView
 	var currentPage, totalPages int
-	
+
 	count := s.leaderboard.Count()
 	if count > 0 {
 		totalPages = s.leaderboard.TotalPages(pageSize)
@@ -537,11 +541,12 @@ func (s *Server) renderError(w http.ResponseWriter, errMsg, inputID string) {
 	}
 
 	s.render(w, pageData{
-		Players:     views,
-		CurrentPage: currentPage,
-		TotalPages:  totalPages,
-		Error:       errMsg,
-		InputID:     inputID,
+		Players:      views,
+		CurrentPage:  currentPage,
+		TotalPages:   totalPages,
+		TotalPlayers: count,
+		Error:        errMsg,
+		InputID:      inputID,
 	})
 }
 
@@ -596,33 +601,33 @@ func (s *Server) handleAdminSeed(w http.ResponseWriter, r *http.Request) {
 
 	enqueued := 0
 	failed := 0
-	
+
 	// Phase 2: 同一请求内内存去重，避免纯随机撞车
 	generated := make(map[string]bool, count)
 
 	for i := 0; i < count; i++ {
 		var onlineID string
 		retries := 0
-		
+
 		// Generate unique online_id with retries
 		// Format: "sim" + 7-digit number (total 10 chars, well under 16-char limit)
 		for {
 			randomNum := rand.Intn(seedIDMaxNum)
 			onlineID = fmt.Sprintf("%s%07d", seedIDPrefix, randomNum)
-			
+
 			// Validate length (must be 3-16 chars)
 			if len(onlineID) < minIDLength || len(onlineID) > maxIDLength {
 				slog.Warn("Generated ID length invalid", slog.Int("length", len(onlineID)))
 				failed++
 				break
 			}
-			
+
 			// 内存去重：检查本次请求内是否已生成
 			if !generated[onlineID] {
 				generated[onlineID] = true
 				break
 			}
-			
+
 			retries++
 			if retries >= maxSeedRetry {
 				slog.Warn("Failed to generate unique ID after retries", slog.Int("max_retries", maxSeedRetry))
@@ -636,10 +641,10 @@ func (s *Server) handleAdminSeed(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Generate random trophy counts with reasonable limits
-		bronze := rand.Intn(5001)    // 0-5000
-		silver := rand.Intn(2001)    // 0-2000
-		gold := rand.Intn(801)       // 0-800
-		platinum := rand.Intn(201)   // 0-200
+		bronze := rand.Intn(5001)  // 0-5000
+		silver := rand.Intn(2001)  // 0-2000
+		gold := rand.Intn(801)     // 0-800
+		platinum := rand.Intn(201) // 0-200
 
 		// Random avatar letter A-Z
 		avatarLetter := string(rune('A' + rand.Intn(26)))

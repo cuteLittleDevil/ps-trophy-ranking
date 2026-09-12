@@ -11,6 +11,7 @@
         <header>
             <h1>PSN 奖杯排行榜</h1>
             <p class="subtitle">按奖杯积分排序的全球玩家排行</p>
+            <p class="player-count">当前 <strong>{{.TotalPlayers}}</strong> 名玩家参与排行榜</p>
         </header>
 
         {{if .Error}}
@@ -61,7 +62,7 @@
                 </thead>
                 <tbody>
                     {{range .Players}}
-                    <tr{{if .IsYou}} class="is-you"{{end}}>
+                    <tr{{if .IsYou}} class="is-you" id="highlighted-player"{{end}}>
                         <td class="rank-col">{{.Rank}}{{if .IsYou}}<span class="you-badge">你</span>{{end}}</td>
                         <td class="avatar-col">
                             {{if and .AvatarURL (hasPrefix .AvatarURL "https://")}}
@@ -124,5 +125,15 @@
             <p>数据源：PSN 真实档案</p>
         </footer>
     </div>
+    <script>
+    (function () {
+        var el = document.getElementById('highlighted-player');
+        if (!el) return;
+        // 入榜/查找/我的排名成功后滚到高亮行
+        requestAnimationFrame(function () {
+            el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        });
+    })();
+    </script>
 </body>
 </html>

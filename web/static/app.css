@@ -32,6 +32,17 @@ h1 {
     margin-bottom: 10px;
 }
 
+.player-count {
+    margin: 0.5rem 0 0;
+    font-size: 0.95rem;
+    color: #a5b4fc;
+}
+
+.player-count strong {
+    color: #c7d2fe;
+    font-weight: 700;
+}
+
 .subtitle {
     font-size: 1rem;
     color: #8a93a6;
@@ -174,6 +185,12 @@ tbody tr:hover {
 tbody tr.is-you {
     background: rgba(99, 102, 241, 0.15);
     border-left: 4px solid #6366f1;
+    animation: is-you-pulse 1.2s ease-out 1;
+}
+
+@keyframes is-you-pulse {
+    0% { background: rgba(99, 102, 241, 0.45); }
+    100% { background: rgba(99, 102, 241, 0.15); }
 }
 
 tbody tr.is-you:hover {
