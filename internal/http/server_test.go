@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -498,8 +499,8 @@ func TestAdminSeedSuccess(t *testing.T) {
 	if enqueued != 5 {
 		t.Errorf("enqueued = %d, want 5", enqueued)
 	}
-        // Phase 2: WAL 写入是异步的，不立即验证数据库内容
-        // 封段刷盘后数据才会出现在 SQLite，测试只验证入队成功
+	// Phase 2: WAL 写入是异步的，不立即验证数据库内容
+	// 封段刷盘后数据才会出现在 SQLite，测试只验证入队成功
 }
 func TestAdminSeedInvalidCount(t *testing.T) {
 	server, store := setupTestServer(t)
@@ -565,7 +566,7 @@ func TestAdminSeedExceedsMax(t *testing.T) {
 	if resp["ok"] != false {
 		t.Error("expected ok=false for count exceeding limit")
 	}
-	
+
 	// 验证错误消息包含限制值
 	if errMsg, ok := resp["error"].(string); ok {
 		if !strings.Contains(errMsg, "1000000") {
@@ -583,7 +584,7 @@ func TestAdminSeedAtMaxLimit(t *testing.T) {
 	// Test exactly at the limit (use small count to verify constant check, not actual execution)
 	// 仅验证边界检查逻辑，不真正入队 100 万条
 	const testMaxSeedCount = 1000000
-	
+
 	// 验证常量值正确
 	if testMaxSeedCount != 1000000 {
 		t.Errorf("maxSeedCount constant should be 1000000, got %d", testMaxSeedCount)
@@ -1034,11 +1035,11 @@ func TestPprofAccessible(t *testing.T) {
 	testSrc := &testSource{lookups: make(map[string]*trophy.Summary)}
 	templatesFS := os.DirFS("../../web/templates")
 	staticFS := os.DirFS("../../web/static")
-	
+
 	tmpDir := t.TempDir()
 	walMgr, _ := wal.New(tmpDir, 10)
 	t.Cleanup(func() { walMgr.Close() })
-	
+
 	server, _ := New(store, testSrc, walMgr, templatesFS, staticFS)
 
 	req := httptest.NewRequest("GET", "/debug/pprof/", nil)
@@ -1052,5 +1053,195 @@ func TestPprofAccessible(t *testing.T) {
 	body := w.Body.String()
 	if !strings.Contains(body, "pprof") {
 		t.Error("pprof index page should contain 'pprof'")
+	}
+}
+
+func TestLeaderboardAPIEmpty(t *testing.T) {
+	server, store := setupTestServer(t)
+	defer store.Close()
+
+	req := httptest.NewRequest("GET", "/api/leaderboard", nil)
+	w := httptest.NewRecorder()
+	server.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	if ct := w.Header().Get("Content-Type"); !strings.Contains(ct, "application/json") {
+		t.Errorf("Content-Type = %q, want application/json", ct)
+	}
+
+	var resp leaderboardAPIResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Page != 1 || resp.PageSize != 50 || resp.Total != 0 || resp.TotalPages != 0 {
+		t.Errorf("unexpected empty response: %+v", resp)
+	}
+	if resp.Items == nil || len(resp.Items) != 0 {
+		t.Errorf("items = %#v, want empty slice", resp.Items)
+	}
+}
+
+func seedAPIPlayers(t *testing.T, server *Server, store *player.Store, n int) {
+	t.Helper()
+	now := time.Now()
+	for i := 0; i < n; i++ {
+		id := formatSimID(i + 1)
+		score := (n - i) * 100
+		p := player.Player{
+			OnlineID:  id,
+			DisplayID: id,
+			AvatarURL: "letter:A",
+			Bronze:    score / 15,
+			Silver:    0,
+			Gold:      0,
+			Platinum:  0,
+			Score:     score,
+			JoinedAt:  now,
+			SyncedAt:  now,
+		}
+		if err := store.Upsert(p); err != nil {
+			t.Fatalf("upsert %s: %v", id, err)
+		}
+		server.UpsertMemory(p)
+	}
+}
+
+func formatSimID(i int) string {
+	return "api" + strings.Repeat("0", 7-len(itoa(i))) + itoa(i)
+}
+
+func itoa(i int) string {
+	return strconv.Itoa(i)
+}
+
+func TestLeaderboardAPIMultiPage(t *testing.T) {
+	server, store := setupTestServer(t)
+	defer store.Close()
+
+	seedAPIPlayers(t, server, store, 120) // 3 pages at size 50
+
+	req := httptest.NewRequest("GET", "/api/leaderboard?page=2&page_size=50", nil)
+	w := httptest.NewRecorder()
+	server.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+
+	var resp leaderboardAPIResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Page != 2 || resp.PageSize != 50 {
+		t.Errorf("page/page_size = %d/%d, want 2/50", resp.Page, resp.PageSize)
+	}
+	if resp.Total != 120 {
+		t.Errorf("total = %d, want 120", resp.Total)
+	}
+	if resp.TotalPages != 3 {
+		t.Errorf("total_pages = %d, want 3", resp.TotalPages)
+	}
+	if len(resp.Items) != 50 {
+		t.Fatalf("items len = %d, want 50", len(resp.Items))
+	}
+	// Highest score first: api0000001 has score 12000, rank 1 on page 1.
+	// Page 2 starts at rank 51.
+	if resp.Items[0].Rank != 51 {
+		t.Errorf("first item rank = %d, want 51", resp.Items[0].Rank)
+	}
+	if resp.Items[0].OnlineID == "" || resp.Items[0].Score <= 0 {
+		t.Errorf("first item incomplete: %+v", resp.Items[0])
+	}
+}
+
+func TestLeaderboardAPIPageSize(t *testing.T) {
+	server, store := setupTestServer(t)
+	defer store.Close()
+
+	seedAPIPlayers(t, server, store, 30)
+
+	req := httptest.NewRequest("GET", "/api/leaderboard?page=1&page_size=10", nil)
+	w := httptest.NewRecorder()
+	server.Handler().ServeHTTP(w, req)
+
+	var resp leaderboardAPIResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.PageSize != 10 {
+		t.Errorf("page_size = %d, want 10", resp.PageSize)
+	}
+	if resp.TotalPages != 3 {
+		t.Errorf("total_pages = %d, want 3", resp.TotalPages)
+	}
+	if len(resp.Items) != 10 {
+		t.Errorf("items len = %d, want 10", len(resp.Items))
+	}
+
+	// Invalid page_size → default 50
+	req = httptest.NewRequest("GET", "/api/leaderboard?page_size=0", nil)
+	w = httptest.NewRecorder()
+	server.Handler().ServeHTTP(w, req)
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode default: %v", err)
+	}
+	if resp.PageSize != 50 {
+		t.Errorf("invalid page_size clamped/default = %d, want 50", resp.PageSize)
+	}
+
+	// Oversized page_size → clamp to maxAPIPageSize
+	req = httptest.NewRequest("GET", "/api/leaderboard?page_size=9999", nil)
+	w = httptest.NewRecorder()
+	server.Handler().ServeHTTP(w, req)
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode clamp: %v", err)
+	}
+	if resp.PageSize != maxAPIPageSize {
+		t.Errorf("oversized page_size = %d, want %d", resp.PageSize, maxAPIPageSize)
+	}
+}
+
+func TestLeaderboardAPIOutOfRangePage(t *testing.T) {
+	server, store := setupTestServer(t)
+	defer store.Close()
+
+	seedAPIPlayers(t, server, store, 10)
+
+	req := httptest.NewRequest("GET", "/api/leaderboard?page=99&page_size=50", nil)
+	w := httptest.NewRecorder()
+	server.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+
+	var resp leaderboardAPIResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Page != 99 {
+		t.Errorf("page = %d, want 99", resp.Page)
+	}
+	if resp.Total != 10 || resp.TotalPages != 1 {
+		t.Errorf("total/total_pages = %d/%d, want 10/1", resp.Total, resp.TotalPages)
+	}
+	if len(resp.Items) != 0 {
+		t.Errorf("items len = %d, want 0 for out-of-range page", len(resp.Items))
+	}
+
+	// page=0 treated as 1
+	req = httptest.NewRequest("GET", "/api/leaderboard?page=0", nil)
+	w = httptest.NewRecorder()
+	server.Handler().ServeHTTP(w, req)
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode page0: %v", err)
+	}
+	if resp.Page != 1 {
+		t.Errorf("page=0 → %d, want 1", resp.Page)
+	}
+	if len(resp.Items) != 10 {
+		t.Errorf("page=0 items = %d, want 10", len(resp.Items))
 	}
 }

@@ -1,10 +1,14 @@
 package memrank
 
 import (
-	"ps-trophy-ranking/internal/player"
-	"ps-trophy-ranking/internal/rank"
+	"fmt"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"ps-trophy-ranking/internal/player"
+	"ps-trophy-ranking/internal/rank"
 )
 
 func TestLeaderboard_LoadAndGet(t *testing.T) {
@@ -565,4 +569,84 @@ func formatLargeID(i int) string {
 		string(rune('0'+i/100%10)) +
 		string(rune('0'+i/10%10)) +
 		string(rune('0'+i%10))
+}
+
+func TestLeaderboard_ConcurrentReadDuringUpsertBatch(t *testing.T) {
+	// 模拟：一边大批量 UpsertBatch（类似 WAL flush），一边大量并发读 Page/Get。
+	lb := New()
+	const initial = 5000
+	players := make([]player.Player, initial)
+	for i := 0; i < initial; i++ {
+		id := formatLargeID(i)
+		players[i] = player.Player{
+			OnlineID:  id,
+			DisplayID: id,
+			Bronze:    i % 50,
+			Silver:    i % 30,
+			Gold:      i % 20,
+			Platinum:  i % 5,
+			Score:     rank.Score(i%50, i%30, i%20, i%5),
+		}
+	}
+	lb.Load(players)
+
+	var (
+		stop  atomic.Bool
+		wg    sync.WaitGroup
+		errCh = make(chan string, 64)
+	)
+
+	const readers = 100
+	wg.Add(readers)
+	for r := 0; r < readers; r++ {
+		go func(id int) {
+			defer wg.Done()
+			for !stop.Load() {
+				_ = lb.Count()
+				_ = lb.Page(1, 50)
+				_ = lb.Get(formatLargeID(id % initial))
+				_ = lb.IndexOf(formatLargeID((id * 7) % initial))
+			}
+		}(r)
+	}
+
+	// 并发写入若干批，模拟 flush
+	const batches = 10
+	const batchSize = 200
+	start := time.Now()
+	for b := 0; b < batches; b++ {
+		batch := make([]player.Player, batchSize)
+		for i := 0; i < batchSize; i++ {
+			n := initial + b*batchSize + i
+			id := formatLargeID(n)
+			batch[i] = player.Player{
+				OnlineID:  id,
+				DisplayID: id,
+				Bronze:    n % 50,
+				Silver:    n % 30,
+				Gold:      n % 20,
+				Platinum:  n % 5,
+				Score:     rank.Score(n%50, n%30, n%20, n%5),
+			}
+		}
+		lb.UpsertBatch(batch)
+		if c := lb.Count(); c < initial {
+			errCh <- fmt.Sprintf("count shrank: %d", c)
+			break
+		}
+	}
+	writeDur := time.Since(start)
+
+	stop.Store(true)
+	wg.Wait()
+	close(errCh)
+	for msg := range errCh {
+		t.Error(msg)
+	}
+
+	want := initial + batches*batchSize
+	if got := lb.Count(); got != want {
+		t.Fatalf("count=%d want=%d", got, want)
+	}
+	t.Logf("concurrent readers=%d batches=%d batchSize=%d write_total=%s final_count=%d", readers, batches, batchSize, writeDur, lb.Count())
 }

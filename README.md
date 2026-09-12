@@ -56,6 +56,23 @@ HTTP Server (chi) ← pprof (/debug/pprof/)
 
 ---
 
+
+## 只读 JSON 排行榜 API
+
+压测与程序化读榜使用：
+
+```bash
+curl "http://127.0.0.1:8080/api/leaderboard?page=1&page_size=50"
+```
+
+无鉴权；默认每页 50。契约与**双 1w 验收**见 `docs/spec-psn-trophy-leaderboard.md`（完整 SPEC：`tasks/spec-psn-trophy-leaderboard.md`）。
+
+双 1w 压测脚本（需本机已启动服务，或见脚本说明）：
+
+```bash
+./scripts/stress_dual_1w.sh
+```
+
 ## 启动排行榜服务
 
 在项目根目录：
@@ -278,6 +295,7 @@ go build ./cmd/server
 
 - 产品需求：`tasks/prd-psn-trophy-leaderboard.md`
 - 技术方案：`tasks/spec-psn-trophy-leaderboard.md`
+- **JSON API / 双 1w 验收摘要**：`docs/spec-psn-trophy-leaderboard.md`
 - **架构图与设计详解**：`docs/architecture.md`（含系统总览、写入/读取流程、WAL 封段时序、性能优化）
 - 提交历史：`提交历史说明.md`
 - 进度：`ROADMAP.md`

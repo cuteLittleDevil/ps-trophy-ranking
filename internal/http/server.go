@@ -27,11 +27,12 @@ import (
 )
 
 const (
-	pageSize     = 50
-	cookieName   = "online_id"
-	cookieMaxAge = 2592000 // 30 days
-	minIDLength  = 3
-	maxIDLength  = 16
+	pageSize       = 50
+	maxAPIPageSize = 100
+	cookieName     = "online_id"
+	cookieMaxAge   = 2592000 // 30 days
+	minIDLength    = 3
+	maxIDLength    = 16
 )
 
 var idPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
@@ -121,6 +122,7 @@ func (s *Server) Handler() http.Handler {
 
 	// Routes
 	r.Get("/", s.handleHome)
+	r.Get("/api/leaderboard", s.handleLeaderboardAPI)
 	r.Post("/join", s.handleJoin)
 	r.Post("/refresh", s.handleRefresh)
 	r.Get("/search", s.handleSearch)
@@ -193,6 +195,83 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
 		TotalPages:   totalPages,
 		TotalPlayers: count,
 	})
+}
+
+type leaderboardAPIResponse struct {
+	Page       int                  `json:"page"`
+	PageSize   int                  `json:"page_size"`
+	Total      int                  `json:"total"`
+	TotalPages int                  `json:"total_pages"`
+	Items      []leaderboardAPIItem `json:"items"`
+}
+
+type leaderboardAPIItem struct {
+	Rank      int    `json:"rank"`
+	OnlineID  string `json:"online_id"`
+	AvatarURL string `json:"avatar_url"`
+	Bronze    int    `json:"bronze"`
+	Silver    int    `json:"silver"`
+	Gold      int    `json:"gold"`
+	Platinum  int    `json:"platinum"`
+	Score     int    `json:"score"`
+}
+
+// handleLeaderboardAPI is the read-only JSON leaderboard page API.
+// GET /api/leaderboard?page=1&page_size=50
+func (s *Server) handleLeaderboardAPI(w http.ResponseWriter, r *http.Request) {
+	page, pageSizeParam := parseLeaderboardPageParams(r)
+
+	total := s.leaderboard.Count()
+	totalPages := s.leaderboard.TotalPages(pageSizeParam)
+
+	items := make([]leaderboardAPIItem, 0)
+	if total > 0 && page <= totalPages {
+		paged := s.leaderboard.Page(page, pageSizeParam)
+		items = make([]leaderboardAPIItem, len(paged))
+		for i, p := range paged {
+			items[i] = leaderboardAPIItem{
+				Rank:      p.Rank,
+				OnlineID:  p.OnlineID,
+				AvatarURL: p.AvatarURL,
+				Bronze:    p.Bronze,
+				Silver:    p.Silver,
+				Gold:      p.Gold,
+				Platinum:  p.Platinum,
+				Score:     p.Score,
+			}
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_ = json.NewEncoder(w).Encode(leaderboardAPIResponse{
+		Page:       page,
+		PageSize:   pageSizeParam,
+		Total:      total,
+		TotalPages: totalPages,
+		Items:      items,
+	})
+}
+
+// parseLeaderboardPageParams mirrors HTML page clamping: page < 1 → 1;
+// page_size defaults to 50; invalid / out-of-range page_size clamped to [1, maxAPIPageSize].
+func parseLeaderboardPageParams(r *http.Request) (page, size int) {
+	page, _ = strconv.Atoi(r.URL.Query().Get("page"))
+	if page < 1 {
+		page = 1
+	}
+
+	sizeStr := r.URL.Query().Get("page_size")
+	if sizeStr == "" {
+		size = pageSize
+	} else {
+		size, _ = strconv.Atoi(sizeStr)
+		if size < 1 {
+			size = pageSize
+		} else if size > maxAPIPageSize {
+			size = maxAPIPageSize
+		}
+	}
+	return page, size
 }
 
 func (s *Server) handleJoin(w http.ResponseWriter, r *http.Request) {

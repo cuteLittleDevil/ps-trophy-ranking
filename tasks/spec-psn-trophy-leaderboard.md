@@ -177,7 +177,7 @@ v1 无独立迁移工具。进程启动时 `CREATE TABLE IF NOT EXISTS`。数据
 
 ## 4. API Design
 
-v1 对外是 HTML 页面和表单；`/admin/seed` 是本机 JSON 管理接口，不是公开 JSON API。
+对外以 HTML 页面和表单为主；另提供只读 JSON 排行榜 API（`GET /api/leaderboard`）供压测与双 1w 验收；`/admin/seed` 是本机 JSON 管理接口。
 
 ### 4.1 Endpoints
 
@@ -189,6 +189,7 @@ v1 对外是 HTML 页面和表单；`/admin/seed` 是本机 JSON 管理接口，
 | GET | `/search` | 按 ID 查找 | 无 | query `online_id` | 302 或 200 带提示 |
 | GET | `/me` | 我的排名 | cookie | 无 | 302 或 200 带提示 |
 | POST | `/admin/seed` | 追加模拟用户 | 仅回环 | `count`（query 或 form） | JSON |
+| GET | `/api/leaderboard` | 只读 JSON 分页榜单 | 无 | `page`、`page_size` | 200 JSON |
 | GET | `/static/*` | CSS 等 | 无 | 无 | 静态文件 |
 
 默认监听 `127.0.0.1:8080`。README 写 `http://127.0.0.1:8080/` 。路由实现：chi v5；未匹配路径 404；panic 由 `middleware.Recoverer` 回收。
@@ -241,6 +242,29 @@ v1 对外是 HTML 页面和表单；`/admin/seed` 是本机 JSON 管理接口，
 - **Phase 2 后**：追加到 WAL，立即返回 `{"ok":true,"enqueued":N,"failed":M}`（含 `enqueued` 字段表示已入队）；实际写入 SQLite 延迟约 100ms–1s
 - **WAL 语义**：`/admin/seed` 返回 200 时，数据已持久化到 WAL 文件（仅剩刷盘窗口 ≤1s 丢失风险）
 - **可见延迟**：冷路径用户约 100ms–1s 后可在排行榜查到；热路径（高分冲榜）实时可见
+
+
+**GET `/api/leaderboard`**
+
+- 无鉴权、只读；复用 `memrank.Leaderboard.Page` / `Count` / `TotalPages`（Top1000 热区与全量 ranked 已在 memrank 内分流）
+- Query：`page`（正整数，默认 1；非法或 `<1` 当 1）、`page_size`（默认 **50**；`<1` 或非法回退 50；`>100` 钳到 100）
+- 响应 JSON：
+
+```json
+{
+  "page": 1,
+  "page_size": 50,
+  "total": 100000,
+  "total_pages": 2000,
+  "items": [
+    {"rank": 1, "online_id": "...", "avatar_url": "...", "bronze": 0, "silver": 0, "gold": 0, "platinum": 0, "score": 0}
+  ]
+}
+```
+
+- 空榜：`total=0`、`total_pages=0`、`items=[]`
+- `page` 超出总页：200，`items=[]`，`total` / `total_pages` 仍返回真实值（与 HTML「没有更多玩家」语义对齐）
+- **不**要求 SSR HTML `GET /` 达到 1w QPS；双 1w 读侧验收针对本 JSON API
 
 ### 4.3 Error Responses
 
@@ -452,7 +476,14 @@ v1 无登录。看榜、入榜、查找、刷新均公开。不实现 CSRF token
 
 ### 8.1 Expected Load
 
-v1 本地演示：个位数并发、最多数百行。**万级并发写入与秒级可见在演进架构范围**（见第 13 节）。
+本地演示仍可小规模使用。**双 1w 验收目标**（见 §8.4；写入细节见第 13 节）：
+
+| 维度 | 目标 | 说明 |
+|------|------|------|
+| 写（冷路径） | 可见玩家增长 ≥ **10k/s** | `POST /admin/seed`；短突发达标即可 |
+| 读（JSON） | `GET /api/leaderboard` 合计 ≥ **10k QPS**，失败约 0 | 可与写入并发 |
+| 读混合 | 50% Top1000 热区 `page∈[1,20]`（`page_size=50`），50% 全库随机页 | |
+| SSR HTML `/` | **不**纳入 10k QPS 硬指标 | 页面体验另测 |
 
 ### 8.2 Optimization Strategy
 
@@ -466,6 +497,18 @@ v1 本地演示：个位数并发、最多数百行。**万级并发写入与秒
 - score 复合索引便于以后改 SQL 排序；v1 仍内存排序以保持竞赛名次简单
 
 ---
+
+
+### 8.4 双 1w 验收（已批准）
+
+验收标准（写入 SPEC，实现与压测脚本对齐）：
+
+1. **写**：冷路径 `/admin/seed`，可见玩家数增长 ≥ **10,000/s**（短突发 OK）
+2. **读**：JSON 分页 API 合计 ≥ **10,000 QPS**，失败约 0；允许与写入并发
+3. **读混合**：50% Top1000 热区 `page∈[1,20]`（`page_size=50`），50% 在全部页码上随机
+4. **SSR**：HTML `GET /` **不要求**达到 10k QPS
+
+压测入口：`scripts/stress_dual_1w.sh`（macOS；依赖已启动的本机服务，或脚本内启动）。输出写可见速率与读 QPS 摘要。
 
 ## 9. Testing Strategy
 
@@ -482,6 +525,7 @@ v1 本地演示：个位数并发、最多数百行。**万级并发写入与秒
 
 - SQLite 临时文件：upsert 不增行、joined_at 不变、synced_at 变、重启后再读
 - HTTP：空榜、入榜 302、非法 ID 不打 Source、查找命中（含 cookie）/未入榜、`/me` 无 cookie
+- `GET /api/leaderboard`：空榜、多页、`page_size` 默认/钳制、越界 page
 - `/admin/seed`：合法追加、ID 前缀 `sim` 与长度、非法 count、超上限、累加、非回环 403
 - `/refresh`：成功、未入榜、冷却、非法 ID、保留 joined_at、form `page` 出现在 Location
 - 头像：https 保留；普通 http / ftp / javascript 清空
